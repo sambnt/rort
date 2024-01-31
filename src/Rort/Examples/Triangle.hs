@@ -8,6 +8,8 @@ import qualified Data.Vector as Vector
 import qualified Vulkan as Vk
 import Control.Monad.IO.Class (liftIO)
 import qualified Data.ByteString as BS
+import qualified Rort.Render.Renderer as Render
+import Rort.Render.Types (PipelineInfo(..), RenderPassLayout (..), ShaderInfo (..), ShaderStageDesc (..), Draw (..))
 
 main = do
   let
@@ -34,3 +36,37 @@ main = do
                          }
 
       vkCtx <- withVkContext cfg win
+
+      vertShaderCode <- liftIO $ BS.readFile "data/tri.vert.spv"
+      fragShaderCode <- liftIO $ BS.readFile "data/tri.frag.spv"
+
+      r <- Render.create vkCtx
+
+      pipeline <- Render.mkPipeline r $
+        PipelineInfo { pipelineDepthTest = Vk.COMPARE_OP_LESS_OR_EQUAL
+                     , pipelineVertexInput = []
+                     , pipelineRenderPassLayout = RenderPassLayout
+                       { renderPassAttachments = []
+                       , renderPassSubpasses = []
+                       , renderPassSubpassDependencies = []
+                       }
+                     }
+
+      shader <- Render.mkShader r $
+        ShaderInfo { shaderVertex = ShaderStageDesc { shaderStageCode = vertShaderCode
+                                                    , shaderStageEntryFunc = "main"
+                                                    }
+                   , shaderFragment = ShaderStageDesc { shaderStageCode = fragShaderCode
+                                                      , shaderStageEntryFunc = "main"
+                                                      }
+                   , shaderPipeline = pipeline
+                   }
+
+      liftIO $ print "Hello world!"
+    -- Renderer.withFrame r $ \frame -> do
+    --   Render.submit frame $ Draw { drawShader = shader
+    --                              , drawVertexOffset = 0
+    --                              , drawInstanceOffset = 0
+    --                              , drawInstanceCount = 1
+    --                              , drawVertexCount = 3
+    --                              }

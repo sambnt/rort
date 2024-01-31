@@ -61,6 +61,8 @@ library
                   , Rort.Window
                   , Rort.Window.GLFW
                   , Rort.Vulkan.Context
+                  , Rort.Render.Types
+                  , Rort.Render.Renderer
 
 executable rort
     import:           project-config
