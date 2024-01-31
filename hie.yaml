@@ -1,0 +1,8 @@
+# Configuration for haskell-language-server.
+
+cradle:
+  cabal:
+    - path: "./src"
+      component: "lib:rort"
+    # - path: "./test"
+    #   component: "rort:test"

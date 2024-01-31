@@ -1,0 +1,19 @@
+index-state: 2023-10-07T00:00:00Z
+with-compiler: ghc-9.4.8
+
+packages:
+    ./.
+
+-- hsc2hs doesn't support cross-compilation. This version of bindings-GLFW
+-- doesn't use hsc2hs.
+source-repository-package
+    type: git
+    location: https://github.com/sevanspowell/bindings-GLFW.git
+    tag: 981f66437efef4c79403cc44a2a477fd02d8def0
+    --sha256: 1zsbyw4fh7rjjmq7bz57zcy92r84n5mm1xgd4n2n4a0036x69cyh
+
+source-repository-package
+    type: git
+    location: https://github.com/phaazon/wavefront.git
+    tag: f61f6373ddbf61c5b6b7ee9154eee0442879ce58
+    --sha256: 0yxlxhzrgwd8hr8z14g71z751w6jaqkbpcpk4hlzi3jbx1qh5w6w

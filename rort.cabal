@@ -1,0 +1,99 @@
+cabal-version:      3.0
+name:               rort
+version:            0.1.0.0
+license-file:       LICENSE
+
+extra-source-files:
+    README.md
+
+common project-config
+  default-language:     Haskell2010
+  default-extensions:   OverloadedStrings
+
+  ghc-options:          -Wall
+                        -Wcompat
+                        -Wincomplete-record-updates
+                        -Wincomplete-uni-patterns
+                        -Wpartial-fields
+                        -Wredundant-constraints
+                        -Wunused-packages
+
+library
+  import:           project-config
+  build-depends:    base >=4.7 && <5
+                  , async
+                  , aeson
+                  , megaparsec
+                  , exceptions
+                  , base64-bytestring
+                  , bytestring
+                  , dunai
+                  , free
+                  , parser-combinators
+                  , containers
+                  , mmorph
+                  , derive-storable
+                  , unordered-containers
+                  , text
+                  , lens
+                  , resourcet
+                  , gltf-loader
+                  , chronos
+                  , rosezipper
+                  , torsor
+                  , topograph
+                  , linear
+                  , vulkan
+                  , GLFW-b
+                  , OpenGL
+                  , bitmap
+                  , stb-image
+                  , stm
+                  , vector
+                  , VulkanMemoryAllocator
+                  , bytestring
+                  , mtl
+                  , wavefront
+                  , bearriver
+  hs-source-dirs:   src
+  default-language: Haskell2010
+  exposed-modules:  Rort.Examples.Triangle
+
+executable rort
+    import:           project-config
+    build-depends:    base >=4.7 && <5
+                    , async
+                    , megaparsec
+                    , exceptions
+                    , dunai
+                    , free
+                    , parser-combinators
+                    , containers
+                    , mmorph
+                    , derive-storable
+                    , unordered-containers
+                    , text
+                    , lens
+                    , resourcet
+                    , gltf-loader
+                    , chronos
+                    , rosezipper
+                    , torsor
+                    -- , sdl2
+                    , topograph
+                    , linear
+                    , OpenGL
+                    , bitmap
+                    , stb-image
+                    , stm
+                    , vector
+                    , bytestring
+                    , mtl
+                    , bearriver
+                    , vector
+                    , GLFW-b
+                    , vulkan
+    hs-source-dirs:   src
+
+    default-language: Haskell2010
+    main-is:  Main.hs
