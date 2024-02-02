@@ -3,6 +3,7 @@ module Rort.Window ( Window
                    , withWindow
                    , withSurface
                    , getRequiredExtensions
+                   , getFramebufferSize
                    ) where
 
 import qualified Graphics.UI.GLFW as GLFW

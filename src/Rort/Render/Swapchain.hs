@@ -4,6 +4,7 @@
 module Rort.Render.Swapchain where
 
 import qualified Vulkan as Vk
+import qualified Vulkan.Exception as Vk
 import Control.Monad.Trans.Resource (MonadResource)
 import qualified Control.Monad.Trans.Resource as ResourceT
 import qualified Vulkan.Zero as Vk
@@ -26,6 +27,8 @@ import Control.Monad.IO.Class (MonadIO)
 import Data.Bits ((.&.))
 import Rort.Util.Resource (Resource)
 import qualified Rort.Util.Resource as Resource
+import Control.Monad.Catch (bracket, MonadMask, Exception)
+import Control.Exception (throwIO, try)
 
 data FrameSync
   = FrameSync { fsFenceInFlight           :: Vk.Fence
@@ -42,10 +45,41 @@ data Swapchain
               , swapchainFrames :: TQueue FrameSync
               }
 
+withNextFrameInFlight
+  :: ( MonadMask m
+     , MonadIO m
+     )
+  => Swapchain
+  -> (FrameSync -> m r)
+  -> m r
+withNextFrameInFlight s =
+  bracket (liftIO . STM.atomically . STM.readTQueue $ swapchainFrames s)
+          (liftIO . STM.atomically . STM.writeTQueue (swapchainFrames s))
+
+data SwapchainOutOfDate = SwapchainOutOfDate
+  deriving (Eq, Show)
+
+instance Exception SwapchainOutOfDate
+
+throwSwapchainOutOfDate :: IO a -> IO a
+throwSwapchainOutOfDate action = do
+  eResult <- try action
+  case eResult of
+    (Left (Vk.VulkanException Vk.ERROR_OUT_OF_DATE_KHR)) ->
+      throwIO SwapchainOutOfDate
+    (Left ex) ->
+      throwIO ex
+    (Right result) ->
+      pure result
+
+throwSwapchainSubOptimal :: Vk.Result -> IO Vk.Result
+throwSwapchainSubOptimal Vk.SUBOPTIMAL_KHR = throwIO SwapchainOutOfDate
+throwSwapchainSubOptimal result            = pure result
+
 withSwapchain
   :: MonadResource m
   => VkContext
-  -> Word32
+  -> Word32 -- ^ Num frames in flight
   -> (Int, Int) -- ^ Frame buffer size
   -> Maybe Swapchain -- ^ Old swapchain
   -> m (Resource Swapchain)

@@ -4,8 +4,10 @@ import qualified Vulkan as Vk
 import Data.ByteString (ByteString)
 import Data.Text (Text)
 import Data.Word (Word32)
+import qualified Vulkan.Zero as Vk
 
 data Handle a = Handle Int
+  deriving (Eq, Ord)
 
 data AttachmentFormat = VulkanFormat Vk.Format
                       | SwapchainColorFormat
@@ -28,6 +30,27 @@ data AttachmentInfo
   --                   , attachmentUsage       :: Vk.ImageUsageFlagBits
   --                   , attachmentAspect      :: Vk.ImageAspectFlagBits
   --                   }
+
+toVkAttachmentDescription
+  :: Vk.Format
+  -> Vk.Format
+  -> AttachmentInfo
+  -> Vk.AttachmentDescription
+toVkAttachmentDescription swapchainColorFormat swapchainDepthFormat (SwapchainAttachment desc) =
+  Vk.AttachmentDescription
+    Vk.zero
+    (case attachmentFormat desc of
+       SwapchainColorFormat -> swapchainColorFormat
+       SwapchainDepthFormat -> swapchainDepthFormat
+       VulkanFormat fmt     -> fmt
+    )
+    (attachmentSamples desc)
+    (attachmentLoadOp desc)
+    (attachmentStoreOp desc)
+    (attachmentStencilLoadOp desc)
+    (attachmentStencilStoreOp desc)
+    (attachmentInitialLayout desc)
+    (attachmentFinalLayout desc)
 
 data RenderPassLayout =
   RenderPassLayout { renderPassAttachments :: [AttachmentInfo]

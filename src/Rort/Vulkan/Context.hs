@@ -4,7 +4,7 @@ module Rort.Vulkan.Context where
 import Control.Monad.Trans.Resource (MonadResource)
 import qualified Vulkan.Core10.DeviceInitialization as VkDev
 import qualified Control.Monad.Trans.Resource as ResourceT
-import Rort.Window (Window, withSurface)
+import Rort.Window (Window, withSurface, getFramebufferSize)
 import Data.Vector (Vector)
 import qualified Data.Vector as Vector
 import qualified Data.ByteString.Char8 as BSC
@@ -23,12 +23,16 @@ import qualified Vulkan.CStruct.Extends as Vk
 import Data.Function ((&))
 import qualified Data.Set as Set
 
-data VkContext = VkContext { vkInstance         :: Vk.Instance
-                           , vkSurface          :: Vk.SurfaceKHR
-                           , vkPhysicalDevice   :: Vk.PhysicalDevice
-                           , vkDevice           :: Vk.Device
-                           , vkQueueFamilies    :: QueueFamilies
-                           , vkMSAASamples      :: Vk.SampleCountFlagBits
+data VkContext = VkContext { vkInstance           :: Vk.Instance
+                           , vkSurface            :: Vk.SurfaceKHR
+                           , vkPhysicalDevice     :: Vk.PhysicalDevice
+                           , vkDevice             :: Vk.Device
+                           , vkQueueFamilies      :: QueueFamilies
+                           , vkMSAASamples        :: Vk.SampleCountFlagBits
+                           , vkGetFramebufferSize :: IO (Int, Int)
+                           , vkPresentationQueue  :: Vk.Queue
+                           , vkGraphicsQueue      :: Vk.Queue
+                           , vkTransferQueue      :: Vk.Queue
                            }
 
 data VkSettings
@@ -88,12 +92,32 @@ withVkContext cfg win = do
       props <- Vk.getPhysicalDeviceProperties physicalDevice
       let samples = getMaxUsableSampleCount props
 
-      pure $ VkContext { vkInstance       = inst
-                       , vkSurface        = surface
-                       , vkPhysicalDevice = physicalDevice
-                       , vkQueueFamilies  = queFamilies
-                       , vkDevice         = logicalDevice
-                       , vkMSAASamples    = samples
+      gfxQueue <-
+        liftIO $ Vk.getDeviceQueue
+          logicalDevice
+          (NE.head $ graphicsQueueFamilies queFamilies)
+          0
+      presentQueue <-
+        liftIO $ Vk.getDeviceQueue
+          logicalDevice
+          (NE.head $ presentationQueueFamilies queFamilies)
+          0
+      transferQueue <-
+        liftIO $ Vk.getDeviceQueue
+          logicalDevice
+          (NE.head $ presentationQueueFamilies queFamilies)
+          0
+
+      pure $ VkContext { vkInstance           = inst
+                       , vkSurface            = surface
+                       , vkPhysicalDevice     = physicalDevice
+                       , vkQueueFamilies      = queFamilies
+                       , vkDevice             = logicalDevice
+                       , vkMSAASamples        = samples
+                       , vkGetFramebufferSize = getFramebufferSize win
+                       , vkPresentationQueue  = presentQueue
+                       , vkGraphicsQueue      = gfxQueue
+                       , vkTransferQueue      = transferQueue
                        }
 withInstance
   :: MonadResource m

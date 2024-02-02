@@ -40,15 +40,49 @@ main = do
       vertShaderCode <- liftIO $ BS.readFile "data/tri.vert.spv"
       fragShaderCode <- liftIO $ BS.readFile "data/tri.frag.spv"
 
-      r <- Render.create vkCtx
+      let numFramesInFlight = 2
+      r <- Render.create vkCtx numFramesInFlight
 
       pipeline <- Render.mkPipeline r $
         PipelineInfo { pipelineDepthTest = Vk.COMPARE_OP_LESS_OR_EQUAL
                      , pipelineVertexInput = []
                      , pipelineRenderPassLayout = RenderPassLayout
-                       { renderPassAttachments = []
-                       , renderPassSubpasses = []
-                       , renderPassSubpassDependencies = []
+                       { renderPassAttachments = [
+                           SwapchainAttachment
+                             $ AttachmentDescription
+                                 SwapchainColorFormat
+                                 Vk.SAMPLE_COUNT_1_BIT -- samples
+                                 Vk.ATTACHMENT_LOAD_OP_CLEAR -- load op
+                                 Vk.ATTACHMENT_STORE_OP_STORE -- store op
+                                 Vk.ATTACHMENT_LOAD_OP_DONT_CARE -- stencil load op
+                                 Vk.ATTACHMENT_STORE_OP_DONT_CARE -- stencil store op
+                                 Vk.IMAGE_LAYOUT_UNDEFINED -- initial image layout
+                                 Vk.IMAGE_LAYOUT_PRESENT_SRC_KHR
+                           ]
+                       , renderPassSubpasses = [
+                           Vk.SubpassDescription
+                             Vk.zero
+                             Vk.PIPELINE_BIND_POINT_GRAPHICS
+                             Vector.empty -- input attachments
+                             -- color attachments
+                             ( Vector.singleton $ Vk.AttachmentReference
+                                 0 -- attachment ix
+                                 Vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+                             )
+                             Vector.empty -- resolve attachments
+                             Nothing -- depth stencil attachments
+                             Vector.empty -- preserve attachments
+                           ]
+                       , renderPassSubpassDependencies = [
+                           Vk.SubpassDependency
+                             Vk.SUBPASS_EXTERNAL -- src subpass
+                             0 -- dst subpass
+                             Vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT -- src stage mask
+                             Vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT -- dst stage mask
+                             Vk.zero -- src access mask
+                             Vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT -- dst access mask
+                             Vk.zero -- dependency flags
+                           ]
                        }
                      }
 
@@ -63,10 +97,11 @@ main = do
                    }
 
       liftIO $ print "Hello world!"
-    -- Renderer.withFrame r $ \frame -> do
-    --   Render.submit frame $ Draw { drawShader = shader
-    --                              , drawVertexOffset = 0
-    --                              , drawInstanceOffset = 0
-    --                              , drawInstanceCount = 1
-    --                              , drawVertexCount = 3
-    --                              }
+    Renderer.withFrame r $ do
+       [ Draw { drawShader = shader
+              , drawVertexOffset = 0
+              , drawInstanceOffset = 0
+              , drawInstanceCount = 1
+              , drawVertexCount = 3
+              }
+       ]
