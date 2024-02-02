@@ -23,12 +23,12 @@ import qualified Vulkan.CStruct.Extends as Vk
 import Data.Function ((&))
 import qualified Data.Set as Set
 
-data VkContext = VkContext { vkInstance       :: Vk.Instance
-                           , vkSurface        :: Vk.SurfaceKHR
-                           , vkPhysicalDevice :: Vk.PhysicalDevice
-                           , vkDevice         :: Vk.Device
-                           , vkQueueFamilies  :: QueueFamilies
-                           , vkMSAASamples    :: Vk.SampleCountFlagBits
+data VkContext = VkContext { vkInstance         :: Vk.Instance
+                           , vkSurface          :: Vk.SurfaceKHR
+                           , vkPhysicalDevice   :: Vk.PhysicalDevice
+                           , vkDevice           :: Vk.Device
+                           , vkQueueFamilies    :: QueueFamilies
+                           , vkMSAASamples      :: Vk.SampleCountFlagBits
                            }
 
 data VkSettings

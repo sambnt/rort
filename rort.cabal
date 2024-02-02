@@ -63,6 +63,8 @@ library
                   , Rort.Vulkan.Context
                   , Rort.Render.Types
                   , Rort.Render.Renderer
+                  , Rort.Render.Swapchain
+                  , Rort.Util.Resource
 
 executable rort
     import:           project-config
