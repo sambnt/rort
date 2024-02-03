@@ -4,5 +4,5 @@ cradle:
   cabal:
     - path: "./src"
       component: "lib:rort"
-    # - path: "./test"
-    #   component: "rort:test"
+    - path: "./test"
+      component: "rort:test"
