@@ -62,7 +62,6 @@ library
                   , Rort.Window.GLFW
                   , Rort.Vulkan.Context
                   , Rort.Render.Types
-                  , Rort.Render.Renderer
                   , Rort.Render.Swapchain
                   , Rort.Util.Resource
 
