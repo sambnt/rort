@@ -2,9 +2,8 @@
 
 module Rort.Examples.Triangle where
 
-import Rort.Window (withWindow, getRequiredExtensions)
+import Rort.Window (withWindow, getRequiredExtensions, getWindowEvent, closeWindow)
 import Rort.Vulkan.Context (withVkContext, VkSettings (..), VkContext (..), graphicsQueueFamilies)
-import Control.Concurrent (threadDelay)
 import Control.Monad.Trans.Resource (runResourceT)
 import qualified Data.Vector as Vector
 import qualified Vulkan as Vk
@@ -19,10 +18,12 @@ import qualified Vulkan.Core10.FundamentalTypes as Extent2D (Extent2D(width, hei
 import qualified Rort.Util.Resource as Resource
 import qualified Vulkan.CStruct.Extends as Vk
 import Data.Bits ((.|.))
-import Control.Monad (forM, forM_)
+import Control.Monad (forM, forM_, when)
 import Data.Functor (void)
 import Foreign (nullPtr)
+import Rort.Window.Types (WindowEvent(..))
 
+main :: IO ()
 main = do
   let
     width = 800
@@ -30,7 +31,6 @@ main = do
 
   withWindow width height "Example: Triangle" $ \win -> do
     windowExts <- getRequiredExtensions win
-
 
     runResourceT $ do
       let
@@ -267,7 +267,7 @@ main = do
       let
         loop = do
           withNextFrameInFlight (Resource.get swapchain) $ \fs -> do
-            Vk.waitForFences
+            void $ Vk.waitForFences
               (vkDevice ctx)
               (Vector.singleton $ fsFenceInFlight fs)
               True
@@ -381,5 +381,20 @@ main = do
                   $ (throwSwapchainSubOptimal =<<)
                   $ throwSwapchainOutOfDate
                   $ Vk.queuePresentKHR (vkPresentationQueue ctx) presentInfo
-          loop
+
+          mEv <- liftIO $ getWindowEvent win
+          shouldContinue <- liftIO $ case mEv of
+            Just (WindowError err) -> do
+              putStrLn $ "Error " <> show err
+              closeWindow win
+              pure False
+            Just WindowClose -> do
+              putStrLn "Window closing..."
+              closeWindow win
+              pure False
+            Just (WindowResize x y) -> do
+              putStrLn $ "Window resizing (" <> show x <> ", " <> show y <> ")"
+              pure True
+            Nothing -> pure True
+          when shouldContinue loop
       loop
