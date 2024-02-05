@@ -60,6 +60,7 @@ library
   exposed-modules:  Rort.Examples.Triangle
                   , Rort.Window
                   , Rort.Window.GLFW
+                  , Rort.Vulkan
                   , Rort.Vulkan.Context
                   , Rort.Render.Types
                   , Rort.Render.Swapchain
