@@ -11,7 +11,7 @@ import qualified Vulkan as Vk
 import Control.Monad.IO.Class (liftIO)
 import qualified Data.ByteString as BS
 import qualified Data.List.NonEmpty as NE
-import Rort.Render.Swapchain (withSwapchain, vkSurfaceFormat, vkImageViews, vkExtent, fsFenceInFlight, withNextFrameInFlight, fsSemaphoreImageAvailable, vkSwapchain, throwSwapchainOutOfDate, fsSemaphoreRenderFinished, throwSwapchainSubOptimal, Swapchain)
+import Rort.Render.Swapchain (withSwapchain, vkSurfaceFormat, vkImageViews, vkExtent, fsFenceInFlight, withNextFrameInFlight, fsSemaphoreImageAvailable, vkSwapchain, throwSwapchainOutOfDate, fsSemaphoreRenderFinished, throwSwapchainSubOptimal, Swapchain, retryOnSwapchainOutOfDate)
 import Rort.Vulkan (withVkShaderModule, withVkPipelineLayout, withVkRenderPass, withVkGraphicsPipelines, withVkFramebuffer, withVkCommandBuffers, withVkCommandPool)
 import qualified Vulkan.Extensions.VK_KHR_surface as VkFormat
 import qualified Vulkan.Zero as Vk
@@ -56,7 +56,8 @@ main = do
 
       let numFramesInFlight = 2
       framebufferSize <- liftIO $ vkGetFramebufferSize ctx
-      swapchain <- withSwapchain ctx numFramesInFlight framebufferSize Nothing
+      initialSwapchain <-
+        withSwapchain ctx numFramesInFlight framebufferSize Nothing
 
       vertShader <-
         withVkShaderModule (vkDevice ctx)
@@ -90,162 +91,162 @@ main = do
               Vector.empty -- set layouts
               Vector.empty -- push constant ranges
 
-
-      -- BEGIN swapchain-dependent
-      let
-        subpassInfo =
-          SubpassInfo { subpassInfoShaderStages = pipelineShaderStages
-                      , subpassInfoPipelineLayout = Resource.get pipelineLayout
-                      }
-        renderPassInfo = RenderPassInfo [subpassInfo]
-      frameDatas <-
-        mkFrameData
-          ctx
-          (Resource.get swapchain)
-          [renderPassInfo]
-      -- END swapchain-dependent
-
       cmdPool <-
         withVkCommandPool
           (vkDevice ctx)
           (NE.head . graphicsQueueFamilies $ vkQueueFamilies ctx)
 
-      -- rendering a frame
-      let
-        loop = do
-          withNextFrameInFlight (Resource.get swapchain) $ \fs -> do
-            void $ Vk.waitForFences
-              (vkDevice ctx)
-              (Vector.singleton $ fsFenceInFlight fs)
-              True
-              maxBound
+      retryOnSwapchainOutOfDate ctx initialSwapchain $ \swapchain -> do
+        -- BEGIN swapchain-dependent
+        let
+          subpassInfo =
+            SubpassInfo { subpassInfoShaderStages = pipelineShaderStages
+                        , subpassInfoPipelineLayout = Resource.get pipelineLayout
+                        }
+          renderPassInfo = RenderPassInfo [subpassInfo]
+        frameDatas <-
+          mkFrameData
+            ctx
+            swapchain
+            [renderPassInfo]
+        -- END swapchain-dependent
 
-            (_, imageIndex) <- liftIO $ throwSwapchainOutOfDate $
-              Vk.acquireNextImageKHR
+        -- rendering a frame
+        let
+          loop = do
+            withNextFrameInFlight swapchain $ \fs -> do
+              void $ Vk.waitForFences
                 (vkDevice ctx)
-                (vkSwapchain $ Resource.get swapchain)
+                (Vector.singleton $ fsFenceInFlight fs)
+                True
                 maxBound
-                (fsSemaphoreImageAvailable fs)
-                Vk.NULL_HANDLE
 
-            -- Only reset fences if we know we are submitting work, otherwise we
-            -- might deadlock later while waiting for the fence to signal.
-            liftIO $ Vk.resetFences
-              (vkDevice ctx)
-              (Vector.singleton $ fsFenceInFlight fs)
+              (_, imageIndex) <- liftIO $ throwSwapchainOutOfDate $
+                Vk.acquireNextImageKHR
+                  (vkDevice ctx)
+                  (vkSwapchain swapchain)
+                  maxBound
+                  (fsSemaphoreImageAvailable fs)
+                  Vk.NULL_HANDLE
 
-            cmdBuffers <-
-              withVkCommandBuffers
+              -- Only reset fences if we know we are submitting work, otherwise we
+              -- might deadlock later while waiting for the fence to signal.
+              liftIO $ Vk.resetFences
                 (vkDevice ctx)
-                $ Vk.CommandBufferAllocateInfo
-                    (Resource.get cmdPool)
-                    -- Primary = can be submitted to queue for execution, can't be
-                    -- called by other command buffers.
-                    Vk.COMMAND_BUFFER_LEVEL_PRIMARY
-                    1 -- count
+                (Vector.singleton $ fsFenceInFlight fs)
 
-            let cmdBuffer = Vector.head $ Resource.get cmdBuffers
-            Vk.beginCommandBuffer cmdBuffer
-              $ Vk.CommandBufferBeginInfo
-                  ()
-                  Vk.zero
-                  Nothing -- Inheritance info
+              cmdBuffers <-
+                withVkCommandBuffers
+                  (vkDevice ctx)
+                  $ Vk.CommandBufferAllocateInfo
+                      (Resource.get cmdPool)
+                      -- Primary = can be submitted to queue for execution, can't be
+                      -- called by other command buffers.
+                      Vk.COMMAND_BUFFER_LEVEL_PRIMARY
+                      1 -- count
 
-            let
-              frameData = Resource.get frameDatas !! fromIntegral imageIndex
-            forM_ (frameRenderPasses frameData) $ \(framebuffer, rp) -> do
-              let
-                clearValues = Vector.fromList [Vk.Color $ Vk.Float32 (254/255) (243/255) (215/255) 0]
-                renderStartPos = Vk.Offset2D 0 0
-                renderExtent = vkExtent $ Resource.get swapchain
-                renderPassBeginInfo =
-                  Vk.RenderPassBeginInfo
+              let cmdBuffer = Vector.head $ Resource.get cmdBuffers
+              Vk.beginCommandBuffer cmdBuffer
+                $ Vk.CommandBufferBeginInfo
                     ()
-                    (renderPass rp)
-                    framebuffer
-                    (Vk.Rect2D renderStartPos renderExtent)
-                    clearValues
-
-              Vk.cmdBeginRenderPass
-                cmdBuffer renderPassBeginInfo Vk.SUBPASS_CONTENTS_INLINE
+                    Vk.zero
+                    Nothing -- Inheritance info
 
               let
-                viewport = Vk.Viewport
-                  0 -- startX
-                  0 -- startY
-                  (fromIntegral $ Extent2D.width renderExtent) -- width
-                  (fromIntegral $ Extent2D.height renderExtent) -- height
-                  0 -- min depth
-                  1 -- max depth
-                scissor = Vk.Rect2D renderStartPos renderExtent
-              Vk.cmdSetViewport
-                cmdBuffer
-                0
-                (Vector.singleton viewport)
-              Vk.cmdSetScissor
-                cmdBuffer
-                0
-                (Vector.singleton scissor)
+                frameData = Resource.get frameDatas !! fromIntegral imageIndex
+              forM_ (frameRenderPasses frameData) $ \(framebuffer, rp) -> do
+                let
+                  clearValues = Vector.fromList [Vk.Color $ Vk.Float32 (254/255) (243/255) (215/255) 0]
+                  renderStartPos = Vk.Offset2D 0 0
+                  renderExtent = vkExtent swapchain
+                  renderPassBeginInfo =
+                    Vk.RenderPassBeginInfo
+                      ()
+                      (renderPass rp)
+                      framebuffer
+                      (Vk.Rect2D renderStartPos renderExtent)
+                      clearValues
 
-              forM_ (renderPassSubpasses rp) $ \(Subpass pipeline) -> do
-                Vk.cmdBindPipeline
-                  cmdBuffer
-                  Vk.PIPELINE_BIND_POINT_GRAPHICS
-                  pipeline
+                Vk.cmdBeginRenderPass
+                  cmdBuffer renderPassBeginInfo Vk.SUBPASS_CONTENTS_INLINE
 
                 let
-                  vertexCount = 3
-                  instanceCount = 1
-                  firstVertex = 0
-                  firstInstance = 0
-                Vk.cmdDraw
-                  cmdBuffer vertexCount instanceCount firstVertex firstInstance
+                  viewport = Vk.Viewport
+                    0 -- startX
+                    0 -- startY
+                    (fromIntegral $ Extent2D.width renderExtent) -- width
+                    (fromIntegral $ Extent2D.height renderExtent) -- height
+                    0 -- min depth
+                    1 -- max depth
+                  scissor = Vk.Rect2D renderStartPos renderExtent
+                Vk.cmdSetViewport
+                  cmdBuffer
+                  0
+                  (Vector.singleton viewport)
+                Vk.cmdSetScissor
+                  cmdBuffer
+                  0
+                  (Vector.singleton scissor)
 
-              Vk.cmdEndRenderPass cmdBuffer
+                forM_ (renderPassSubpasses rp) $ \(Subpass pipeline) -> do
+                  Vk.cmdBindPipeline
+                    cmdBuffer
+                    Vk.PIPELINE_BIND_POINT_GRAPHICS
+                    pipeline
 
-            Vk.endCommandBuffer cmdBuffer
+                  let
+                    vertexCount = 3
+                    instanceCount = 1
+                    firstVertex = 0
+                    firstInstance = 0
+                  Vk.cmdDraw
+                    cmdBuffer vertexCount instanceCount firstVertex firstInstance
 
-            let
-              submitInfo =
-                Vk.SubmitInfo
+                Vk.cmdEndRenderPass cmdBuffer
+
+              Vk.endCommandBuffer cmdBuffer
+
+              let
+                submitInfo =
+                  Vk.SubmitInfo
+                    ()
+                    (Vector.singleton $ fsSemaphoreImageAvailable fs)
+                    (Vector.singleton Vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT)
+                    (Vector.singleton $ Vk.commandBufferHandle cmdBuffer)
+                    (Vector.singleton $ fsSemaphoreRenderFinished fs)
+              liftIO $ Vk.queueSubmit
+                (vkGraphicsQueue ctx)
+                (Vector.singleton $ Vk.SomeStruct submitInfo)
+                (fsFenceInFlight fs)
+
+              let
+                presentInfo = Vk.PresentInfoKHR
                   ()
-                  (Vector.singleton $ fsSemaphoreImageAvailable fs)
-                  (Vector.singleton Vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT)
-                  (Vector.singleton $ Vk.commandBufferHandle cmdBuffer)
                   (Vector.singleton $ fsSemaphoreRenderFinished fs)
-            liftIO $ Vk.queueSubmit
-              (vkGraphicsQueue ctx)
-              (Vector.singleton $ Vk.SomeStruct submitInfo)
-              (fsFenceInFlight fs)
+                  (Vector.singleton $ vkSwapchain swapchain)
+                  (Vector.singleton imageIndex)
+                  nullPtr
+              liftIO $ void
+                $ (throwSwapchainSubOptimal =<<)
+                $ throwSwapchainOutOfDate
+                $ Vk.queuePresentKHR (vkPresentationQueue ctx) presentInfo
 
-            let
-              presentInfo = Vk.PresentInfoKHR
-                ()
-                (Vector.singleton $ fsSemaphoreRenderFinished fs)
-                (Vector.singleton $ vkSwapchain $ Resource.get swapchain)
-                (Vector.singleton imageIndex)
-                nullPtr
-            liftIO $ void
-              $ (throwSwapchainSubOptimal =<<)
-              $ throwSwapchainOutOfDate
-              $ Vk.queuePresentKHR (vkPresentationQueue ctx) presentInfo
-
-          mEv <- liftIO $ getWindowEvent win
-          shouldContinue <- liftIO $ case mEv of
-            Just (WindowError err) -> do
-              putStrLn $ "Error " <> show err
-              closeWindow win
-              pure False
-            Just WindowClose -> do
-              putStrLn "Window closing..."
-              closeWindow win
-              pure False
-            Just (WindowResize x y) -> do
-              putStrLn $ "Window resizing (" <> show x <> ", " <> show y <> ")"
-              pure True
-            Nothing -> pure True
-          when shouldContinue loop
-      loop
+            mEv <- liftIO $ getWindowEvent win
+            shouldContinue <- liftIO $ case mEv of
+              Just (WindowError err) -> do
+                putStrLn $ "Error " <> show err
+                closeWindow win
+                pure False
+              Just WindowClose -> do
+                putStrLn "Window closing..."
+                closeWindow win
+                pure False
+              Just (WindowResize x y) -> do
+                putStrLn $ "Window resizing (" <> show x <> ", " <> show y <> ")"
+                pure True
+              Nothing -> pure True
+            when shouldContinue loop
+        loop
 
 -- input
 data SubpassInfo

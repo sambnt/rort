@@ -5,12 +5,12 @@ module Rort.Render.Swapchain where
 
 import qualified Vulkan as Vk
 import qualified Vulkan.Exception as Vk
-import Control.Monad.Trans.Resource (MonadResource)
+import Control.Monad.Trans.Resource (MonadResource, runResourceT, MonadUnliftIO)
 import qualified Control.Monad.Trans.Resource as ResourceT
 import qualified Vulkan.Zero as Vk
 import Control.Concurrent.STM (TQueue, newTQueueIO)
 import qualified Control.Concurrent.STM as STM
-import Rort.Vulkan.Context (VkContext, vkDevice, swapchainSupportCapabilities, swapchainSupportPresentModes, querySwapchainSupport, swapchainSupportFormats, vkSurface, vkPhysicalDevice, graphicsQueueFamilies, presentationQueueFamilies, vkQueueFamilies)
+import Rort.Vulkan.Context (VkContext, vkDevice, swapchainSupportCapabilities, swapchainSupportPresentModes, querySwapchainSupport, swapchainSupportFormats, vkSurface, vkPhysicalDevice, graphicsQueueFamilies, presentationQueueFamilies, vkQueueFamilies, vkGetFramebufferSize)
 import Data.Word (Word32)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad (replicateM, forM_)
@@ -27,8 +27,8 @@ import Control.Monad.IO.Class (MonadIO)
 import Data.Bits ((.&.))
 import Rort.Util.Resource (Resource)
 import qualified Rort.Util.Resource as Resource
-import Control.Monad.Catch (bracket, MonadMask, Exception)
-import Control.Exception (throwIO, try)
+import Control.Monad.Catch (bracket, MonadMask, Exception, handleIf, MonadCatch)
+import Control.Exception (throwIO, try, SomeException, fromException)
 
 data FrameSync
   = FrameSync { fsFenceInFlight           :: Vk.Fence
@@ -37,12 +37,13 @@ data FrameSync
               }
 
 data Swapchain
-  = Swapchain { vkSwapchain     :: Vk.SwapchainKHR
-              , vkImageViews    :: Vector Vk.ImageView
-              , vkSurfaceFormat :: Vk.SurfaceFormatKHR
-              , vkDepthFormat   :: Vk.Format
-              , vkExtent        :: Vk.Extent2D
-              , swapchainFrames :: TQueue FrameSync
+  = Swapchain { vkSwapchain                :: Vk.SwapchainKHR
+              , vkImageViews               :: Vector Vk.ImageView
+              , vkSurfaceFormat            :: Vk.SurfaceFormatKHR
+              , vkDepthFormat              :: Vk.Format
+              , vkExtent                   :: Vk.Extent2D
+              , swapchainFrames            :: TQueue FrameSync
+              , swapchainNumFramesInFlight :: Word32
               }
 
 withNextFrameInFlight
@@ -61,6 +62,12 @@ data SwapchainOutOfDate = SwapchainOutOfDate
 
 instance Exception SwapchainOutOfDate
 
+isSwapchainOutOfDate :: SomeException -> Bool
+isSwapchainOutOfDate e =
+  case fromException e of
+    Just SwapchainOutOfDate -> True
+    _                       -> False
+
 throwSwapchainOutOfDate :: IO a -> IO a
 throwSwapchainOutOfDate action = do
   eResult <- try action
@@ -75,6 +82,28 @@ throwSwapchainOutOfDate action = do
 throwSwapchainSubOptimal :: Vk.Result -> IO Vk.Result
 throwSwapchainSubOptimal Vk.SUBOPTIMAL_KHR = throwIO SwapchainOutOfDate
 throwSwapchainSubOptimal result            = pure result
+
+retryOnSwapchainOutOfDate
+  :: (MonadCatch m, MonadResource m, MonadUnliftIO m)
+  => VkContext
+  -> Resource Swapchain
+  -> (Swapchain -> ResourceT.ResourceT m a)
+  -> m a
+retryOnSwapchainOutOfDate ctx initialSwapchain f = do
+  handleIf isSwapchainOutOfDate
+    (\_ -> do
+        framebufferSize <- liftIO $ vkGetFramebufferSize ctx
+        swapchain <-
+          withSwapchain
+            ctx
+            (swapchainNumFramesInFlight $ Resource.get initialSwapchain)
+            framebufferSize
+            (Just $ Resource.get initialSwapchain)
+        liftIO $ Resource.free initialSwapchain
+        -- Retry the computation
+        retryOnSwapchainOutOfDate ctx swapchain f
+    )
+    (runResourceT $ f $ Resource.get initialSwapchain)
 
 withSwapchain
   :: MonadResource m
@@ -121,6 +150,7 @@ withSwapchain ctx numFramesInFlight framebufferSize mOldSwapchain = do
                    <*> pure depthFormat
                    <*> pure (VkSwapchain.imageExtent sci)
                    <*> pure framesQue
+                   <*> pure numFramesInFlight
 
 mkSwapchainCreateInfo
   :: MonadIO m
