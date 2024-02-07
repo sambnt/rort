@@ -20,10 +20,9 @@ import qualified Rort.Util.Resource as Resource
 import qualified Vulkan.CStruct.Extends as Vk
 import Data.Bits ((.|.))
 import Control.Monad (forM, forM_, when)
-import Data.Functor (void)
+import Data.Functor (void, (<&>))
 import Foreign (nullPtr)
 import Rort.Window.Types (WindowEvent(..))
-import Data.Vector (Vector)
 import Rort.Util.Resource (Resource)
 
 main :: IO ()
@@ -93,12 +92,17 @@ main = do
 
 
       -- BEGIN swapchain-dependent
-      framebuffers <-
-        perSwapchain
+      let
+        subpassInfo =
+          SubpassInfo { subpassInfoShaderStages = pipelineShaderStages
+                      , subpassInfoPipelineLayout = Resource.get pipelineLayout
+                      }
+        renderPassInfo = RenderPassInfo [subpassInfo]
+      frameDatas <-
+        mkFrameData
           ctx
           (Resource.get swapchain)
-          pipelineShaderStages
-          (Resource.get pipelineLayout)
+          [renderPassInfo]
       -- END swapchain-dependent
 
       cmdPool <-
@@ -147,42 +151,43 @@ main = do
                   Vk.zero
                   Nothing -- Inheritance info
 
-            forM_ (framebuffers Vector.! fromIntegral imageIndex)
-              $ \(rp, ps, framebuffer) -> do
-                let
-                  clearValues = Vector.fromList [Vk.Color $ Vk.Float32 (254/255) (243/255) (215/255) 0]
-                  renderStartPos = Vk.Offset2D 0 0
-                  renderExtent = vkExtent $ Resource.get swapchain
-                  renderPassBeginInfo =
-                    Vk.RenderPassBeginInfo
-                      ()
-                      (Resource.get rp)
-                      (Resource.get framebuffer)
-                      (Vk.Rect2D renderStartPos renderExtent)
-                      clearValues
+            let
+              frameData = Resource.get frameDatas !! fromIntegral imageIndex
+            forM_ (frameRenderPasses frameData) $ \(framebuffer, rp) -> do
+              let
+                clearValues = Vector.fromList [Vk.Color $ Vk.Float32 (254/255) (243/255) (215/255) 0]
+                renderStartPos = Vk.Offset2D 0 0
+                renderExtent = vkExtent $ Resource.get swapchain
+                renderPassBeginInfo =
+                  Vk.RenderPassBeginInfo
+                    ()
+                    (renderPass rp)
+                    framebuffer
+                    (Vk.Rect2D renderStartPos renderExtent)
+                    clearValues
 
-                Vk.cmdBeginRenderPass
-                  cmdBuffer renderPassBeginInfo Vk.SUBPASS_CONTENTS_INLINE
+              Vk.cmdBeginRenderPass
+                cmdBuffer renderPassBeginInfo Vk.SUBPASS_CONTENTS_INLINE
 
-                let
-                  viewport = Vk.Viewport
-                    0 -- startX
-                    0 -- startY
-                    (fromIntegral $ Extent2D.width renderExtent) -- width
-                    (fromIntegral $ Extent2D.height renderExtent) -- height
-                    0 -- min depth
-                    1 -- max depth
-                  scissor = Vk.Rect2D renderStartPos renderExtent
-                Vk.cmdSetViewport
-                  cmdBuffer
-                  0
-                  (Vector.singleton viewport)
-                Vk.cmdSetScissor
-                  cmdBuffer
-                  0
-                  (Vector.singleton scissor)
+              let
+                viewport = Vk.Viewport
+                  0 -- startX
+                  0 -- startY
+                  (fromIntegral $ Extent2D.width renderExtent) -- width
+                  (fromIntegral $ Extent2D.height renderExtent) -- height
+                  0 -- min depth
+                  1 -- max depth
+                scissor = Vk.Rect2D renderStartPos renderExtent
+              Vk.cmdSetViewport
+                cmdBuffer
+                0
+                (Vector.singleton viewport)
+              Vk.cmdSetScissor
+                cmdBuffer
+                0
+                (Vector.singleton scissor)
 
-                let pipeline = Vector.head $ Resource.get ps
+              forM_ (renderPassSubpasses rp) $ \(Subpass pipeline) -> do
                 Vk.cmdBindPipeline
                   cmdBuffer
                   Vk.PIPELINE_BIND_POINT_GRAPHICS
@@ -196,34 +201,34 @@ main = do
                 Vk.cmdDraw
                   cmdBuffer vertexCount instanceCount firstVertex firstInstance
 
-                Vk.cmdEndRenderPass cmdBuffer
+              Vk.cmdEndRenderPass cmdBuffer
 
-                Vk.endCommandBuffer cmdBuffer
+            Vk.endCommandBuffer cmdBuffer
 
-                let
-                  submitInfo =
-                    Vk.SubmitInfo
-                      ()
-                      (Vector.singleton $ fsSemaphoreImageAvailable fs)
-                      (Vector.singleton Vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT)
-                      (Vector.singleton $ Vk.commandBufferHandle cmdBuffer)
-                      (Vector.singleton $ fsSemaphoreRenderFinished fs)
-                liftIO $ Vk.queueSubmit
-                  (vkGraphicsQueue ctx)
-                  (Vector.singleton $ Vk.SomeStruct submitInfo)
-                  (fsFenceInFlight fs)
+            let
+              submitInfo =
+                Vk.SubmitInfo
+                  ()
+                  (Vector.singleton $ fsSemaphoreImageAvailable fs)
+                  (Vector.singleton Vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT)
+                  (Vector.singleton $ Vk.commandBufferHandle cmdBuffer)
+                  (Vector.singleton $ fsSemaphoreRenderFinished fs)
+            liftIO $ Vk.queueSubmit
+              (vkGraphicsQueue ctx)
+              (Vector.singleton $ Vk.SomeStruct submitInfo)
+              (fsFenceInFlight fs)
 
-                let
-                  presentInfo = Vk.PresentInfoKHR
-                    ()
-                    (Vector.singleton $ fsSemaphoreRenderFinished fs)
-                    (Vector.singleton $ vkSwapchain $ Resource.get swapchain)
-                    (Vector.singleton imageIndex)
-                    nullPtr
-                liftIO $ void
-                  $ (throwSwapchainSubOptimal =<<)
-                  $ throwSwapchainOutOfDate
-                  $ Vk.queuePresentKHR (vkPresentationQueue ctx) presentInfo
+            let
+              presentInfo = Vk.PresentInfoKHR
+                ()
+                (Vector.singleton $ fsSemaphoreRenderFinished fs)
+                (Vector.singleton $ vkSwapchain $ Resource.get swapchain)
+                (Vector.singleton imageIndex)
+                nullPtr
+            liftIO $ void
+              $ (throwSwapchainSubOptimal =<<)
+              $ throwSwapchainOutOfDate
+              $ Vk.queuePresentKHR (vkPresentationQueue ctx) presentInfo
 
           mEv <- liftIO $ getWindowEvent win
           shouldContinue <- liftIO $ case mEv of
@@ -242,69 +247,85 @@ main = do
           when shouldContinue loop
       loop
 
-perSwapchain
+-- input
+data SubpassInfo
+  = SubpassInfo { subpassInfoShaderStages   :: [Vk.PipelineShaderStageCreateInfo '[]]
+                , subpassInfoPipelineLayout :: Vk.PipelineLayout
+                }
+
+data RenderPassInfo
+  = RenderPassInfo { renderPassInfoSubpasses :: [SubpassInfo]
+                   }
+
+-- output
+data Subpass
+  = Subpass { subpassPipeline :: Vk.Pipeline
+            }
+
+data RenderPass
+  = RenderPass { renderPass :: Vk.RenderPass
+               , renderPassSubpasses :: [Subpass]
+               }
+
+data FrameData
+  = FrameData { frameRenderPasses :: [(Vk.Framebuffer, RenderPass)]
+              }
+
+
+mkFrameData
   :: MonadResource m
   => VkContext
   -> Swapchain
-  -> [Vk.PipelineShaderStageCreateInfo '[]]
-  -> Vk.PipelineLayout
-  -> m (Vector [( Resource Vk.RenderPass
-                , Resource (Vector Vk.Pipeline)
-                , Resource Vk.Framebuffer
-                )
-               ]
-       )
-perSwapchain ctx swapchain pipelineShaderStages pipelineLayout = do
-  renderPass
-    <- withVkRenderPass (vkDevice ctx)
-         $ Vk.RenderPassCreateInfo
-             ()
-             Vk.zero
-             -- attachment descriptions
-             ( Vector.singleton $ Vk.AttachmentDescription
-                 Vk.zero
-                 (VkFormat.format $ vkSurfaceFormat swapchain)
-                 Vk.SAMPLE_COUNT_1_BIT            -- Samples
-                 Vk.ATTACHMENT_LOAD_OP_CLEAR      -- Load op, what to do with framebuffer before rendering
-                 Vk.ATTACHMENT_STORE_OP_STORE     -- Store op, store the framebuffer
-                 Vk.ATTACHMENT_LOAD_OP_DONT_CARE  -- Stencil load op
-                 Vk.ATTACHMENT_STORE_OP_DONT_CARE -- Stencil store op
-                 Vk.IMAGE_LAYOUT_UNDEFINED        -- Initial layout
-                 Vk.IMAGE_LAYOUT_PRESENT_SRC_KHR  -- Final layout
-             )
-             -- subpass descriptions
-             ( Vector.singleton $ Vk.SubpassDescription
-                 Vk.zero
-                 Vk.PIPELINE_BIND_POINT_GRAPHICS
-                 Vector.empty -- input attachments
-                 -- color attachments
-                 ( Vector.singleton $ Vk.AttachmentReference
-                     0 -- attachment ix
-                     Vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
-                 )
-                 Vector.empty -- resolve attachments
-                 Nothing      -- depth stencil attachments
-                 Vector.empty -- preserve attachments
-             )
-             -- subpass dependencies
-             ( Vector.singleton $ Vk.SubpassDependency
-                 Vk.SUBPASS_EXTERNAL -- src subpass
-                 0 -- dst subpass
-                 Vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT -- src stage mask
-                 Vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT -- dst stage mask
-                 Vk.zero -- src access mask
-                 Vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT -- dst access mask
-                 Vk.zero -- dependency flags
-             )
-
-  pipelines <-
-    withVkGraphicsPipelines
-      (vkDevice ctx)
-      Vk.NULL_HANDLE -- pipeline cache
-      ( Vector.singleton
-        $ Vk.GraphicsPipelineCreateInfo () Vk.zero
-            (fromIntegral $ length pipelineShaderStages)
-            (Vk.SomeStruct <$> Vector.fromList pipelineShaderStages)
+  -> [RenderPassInfo]
+  -> m (Resource [FrameData])
+mkFrameData ctx swapchain renderPassInfos = do
+  renderPasses <- forM renderPassInfos $ \renderPassInfo -> do
+    rp <- withVkRenderPass (vkDevice ctx)
+           $ Vk.RenderPassCreateInfo
+               ()
+               Vk.zero
+               -- attachment descriptions
+               ( Vector.singleton $ Vk.AttachmentDescription
+                   Vk.zero
+                   (VkFormat.format $ vkSurfaceFormat swapchain)
+                   Vk.SAMPLE_COUNT_1_BIT            -- Samples
+                   Vk.ATTACHMENT_LOAD_OP_CLEAR      -- Load op, what to do with framebuffer before rendering
+                   Vk.ATTACHMENT_STORE_OP_STORE     -- Store op, store the framebuffer
+                   Vk.ATTACHMENT_LOAD_OP_DONT_CARE  -- Stencil load op
+                   Vk.ATTACHMENT_STORE_OP_DONT_CARE -- Stencil store op
+                   Vk.IMAGE_LAYOUT_UNDEFINED        -- Initial layout
+                   Vk.IMAGE_LAYOUT_PRESENT_SRC_KHR  -- Final layout
+               )
+               -- subpass descriptions
+               ( Vector.singleton $ Vk.SubpassDescription
+                   Vk.zero
+                   Vk.PIPELINE_BIND_POINT_GRAPHICS
+                   Vector.empty -- input attachments
+                   -- color attachments
+                   ( Vector.singleton $ Vk.AttachmentReference
+                       0 -- attachment ix
+                       Vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+                   )
+                   Vector.empty -- resolve attachments
+                   Nothing      -- depth stencil attachments
+                   Vector.empty -- preserve attachments
+               )
+               -- subpass dependencies
+               ( Vector.singleton $ Vk.SubpassDependency
+                   Vk.SUBPASS_EXTERNAL -- src subpass
+                   0 -- dst subpass
+                   Vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT -- src stage mask
+                   Vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT -- dst stage mask
+                   Vk.zero -- src access mask
+                   Vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT -- dst access mask
+                   Vk.zero -- dependency flags
+               )
+    let
+      pipelineCreateInfos =
+        (zip [0..] $ renderPassInfoSubpasses renderPassInfo) <&> \(subpassIx, subpassInfo) ->
+          Vk.GraphicsPipelineCreateInfo () Vk.zero
+            (fromIntegral $ length $ subpassInfoShaderStages subpassInfo)
+            (fmap Vk.SomeStruct . Vector.fromList $ subpassInfoShaderStages subpassInfo)
             ( Just . Vk.SomeStruct
               $ Vk.PipelineVertexInputStateCreateInfo
                   ()
@@ -399,27 +420,36 @@ perSwapchain ctx swapchain pipelineShaderStages pipelineLayout = do
                                      ]
                     )
             )
-            pipelineLayout
-            (Resource.get renderPass)
-            0 -- subpass index
+            (subpassInfoPipelineLayout subpassInfo)
+            (Resource.get rp)
+            subpassIx -- subpass index
             Vk.NULL_HANDLE -- pipeline handle (inheritance)
             (-1) -- pipeline index (inheritance)
-      )
 
-  let renderPasses = [(renderPass, pipelines)]
-  framebuffers <-
-    forM (vkImageViews swapchain) $ \iv -> do
-      forM renderPasses $ \(rp, ps) -> do
+    pipelines <-
+      withVkGraphicsPipelines
+        (vkDevice ctx)
+        Vk.NULL_HANDLE
+        (Vector.fromList pipelineCreateInfos)
+
+    let
+      subpasses = fmap Subpass . Vector.toList <$> pipelines
+
+    pure $ RenderPass <$> rp <*> subpasses
+
+  frameDatas <-
+    forM (Vector.toList $ vkImageViews swapchain) $ \iv -> do
+      fmap (fmap FrameData . sequence) <$> forM renderPasses $ \rp -> do
         framebuffer <- withVkFramebuffer (vkDevice ctx)
           $ Vk.FramebufferCreateInfo
-              ()
-              Vk.zero
-              (Resource.get rp) -- render pass
-              (Vector.singleton iv) -- attachments
-              -- dimensions
-              (Extent2D.width $ vkExtent swapchain)
-              (Extent2D.height $ vkExtent swapchain)
-              1 -- layers
-        pure (rp, ps, framebuffer)
+            ()
+            Vk.zero
+            (renderPass $ Resource.get rp) -- render pass
+            (Vector.singleton iv) -- attachments
+            -- dimensions
+            (Extent2D.width $ vkExtent swapchain)
+            (Extent2D.height $ vkExtent swapchain)
+            1 -- layers
+        pure $ (,) <$> framebuffer <*> rp
 
-  pure framebuffers
+  pure $ sequence frameDatas
