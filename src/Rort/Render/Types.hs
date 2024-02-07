@@ -1,88 +1,61 @@
+{-# LANGUAGE DataKinds #-}
 module Rort.Render.Types where
 
+import Data.Word (Word32, Word64)
+import Data.Int (Int32)
 import qualified Vulkan as Vk
-import Data.ByteString (ByteString)
-import Data.Text (Text)
-import Data.Word (Word32)
-import qualified Vulkan.Zero as Vk
 
-data Handle a = Handle Int
-  deriving (Eq, Ord)
+data BufferRef = BufferRef { bufRefBuffer :: Vk.Buffer
+                           , bufRefOffset :: Word64
+                           }
 
-data AttachmentFormat = VulkanFormat Vk.Format
-                      | SwapchainColorFormat
-                      | SwapchainDepthFormat
-
-data AttachmentDescription
-  = AttachmentDescription { attachmentFormat         :: AttachmentFormat
-                          , attachmentSamples        :: Vk.SampleCountFlagBits
-                          , attachmentLoadOp         :: Vk.AttachmentLoadOp
-                          , attachmentStoreOp        :: Vk.AttachmentStoreOp
-                          , attachmentStencilLoadOp  :: Vk.AttachmentLoadOp
-                          , attachmentStencilStoreOp :: Vk.AttachmentStoreOp
-                          , attachmentInitialLayout  :: Vk.ImageLayout
-                          , attachmentFinalLayout    :: Vk.ImageLayout
-                          }
-
-data AttachmentInfo
-  = SwapchainAttachment AttachmentDescription
-  -- | ImageAttachment { attachmentDescription :: AttachmentDescription
-  --                   , attachmentUsage       :: Vk.ImageUsageFlagBits
-  --                   , attachmentAspect      :: Vk.ImageAspectFlagBits
-  --                   }
-
-toVkAttachmentDescription
-  :: Vk.Format
-  -> Vk.Format
-  -> AttachmentInfo
-  -> Vk.AttachmentDescription
-toVkAttachmentDescription swapchainColorFormat swapchainDepthFormat (SwapchainAttachment desc) =
-  Vk.AttachmentDescription
-    Vk.zero
-    (case attachmentFormat desc of
-       SwapchainColorFormat -> swapchainColorFormat
-       SwapchainDepthFormat -> swapchainDepthFormat
-       VulkanFormat fmt     -> fmt
-    )
-    (attachmentSamples desc)
-    (attachmentLoadOp desc)
-    (attachmentStoreOp desc)
-    (attachmentStencilLoadOp desc)
-    (attachmentStencilStoreOp desc)
-    (attachmentInitialLayout desc)
-    (attachmentFinalLayout desc)
-
-data RenderPassLayout =
-  RenderPassLayout { renderPassAttachments :: [AttachmentInfo]
-                   , renderPassSubpasses :: [Vk.SubpassDescription]
-                   , renderPassSubpassDependencies :: [Vk.SubpassDependency]
-                   }
-
-data PipelineInfo =
-  PipelineInfo { pipelineDepthTest :: Vk.CompareOp
-               , pipelineVertexInput :: [()]
-               , pipelineRenderPassLayout :: RenderPassLayout
-               }
-
-data Pipeline
-
-data ShaderStageDesc
-  = ShaderStageDesc { shaderStageCode      :: ByteString
-                    , shaderStageEntryFunc :: Text
+data DrawCallIndexed
+  = DrawCallIndexed { drawCallIndexedIndexCount    :: Word32
+                    , drawCallIndexedInstanceCount :: Word32
+                    , drawCallIndexedFirstIndex    :: Word32
+                    , drawCallIndexedVertexOffset  :: Int32
+                    , drawCallIndexedFirstInstance :: Word32
                     }
 
-data ShaderInfo
-  = ShaderInfo { shaderVertex     :: ShaderStageDesc
-               , shaderFragment   :: ShaderStageDesc
-               , shaderPipeline   :: Handle Pipeline
-               }
+data DrawCallPrimitive
+  = DrawCallPrimitive { drawCallPrimitiveFirstVertex :: Word32
+                      , drawCallPrimitiveFirstInstance :: Word32
+                      , drawCallPrimitiveInstanceCount :: Word32
+                      , drawCallPrimitiveVertexCount :: Word32
+                      }
 
-data Shader
+data DrawCall = IndexedDraw DrawCallIndexed
+              | PrimitiveDraw DrawCallPrimitive
 
 data Draw
-  = Draw { drawShader         :: Shader
-         , drawVertexOffset   :: Word32
-         , drawInstanceOffset :: Word32
-         , drawInstanceCount  :: Word32
-         , drawVertexCount    :: Word32
+  = Draw { drawCall :: DrawCall
+         , drawVertexBuffers :: [BufferRef]
+         , drawIndexBuffers  :: [(BufferRef, Vk.IndexType)]
          }
+
+data SubpassInfo
+  = SubpassInfo { subpassInfoShaderStages     :: [Vk.PipelineShaderStageCreateInfo '[]]
+                , subpassInfoPipelineLayout   :: Vk.PipelineLayout
+                , subpassInfoVertexBindings   :: [Vk.VertexInputBindingDescription]
+                , subpassInfoVertexAttributes :: [Vk.VertexInputAttributeDescription]
+                , subpassInfoDraw             :: Draw
+                }
+
+data RenderPassInfo
+  = RenderPassInfo { renderPassInfoSubpasses :: [SubpassInfo]
+                   }
+
+-- output
+data Subpass
+  = Subpass { subpassPipeline :: Vk.Pipeline
+            , subpassDraw     :: Draw
+            }
+
+data RenderPass
+  = RenderPass { renderPass :: Vk.RenderPass
+               , renderPassSubpasses :: [Subpass]
+               }
+
+data FrameData
+  = FrameData { frameRenderPasses :: [(Vk.Framebuffer, RenderPass)]
+              }

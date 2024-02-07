@@ -66,6 +66,7 @@ library
                   , Rort.Vulkan.Context
                   , Rort.Render.Types
                   , Rort.Render.Swapchain
+                  , Rort.Render
                   , Rort.Util.Resource
 
 executable rort
