@@ -1,15 +1,20 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Rort.Vulkan where
 import qualified Vulkan as Vk
-import Control.Monad.Trans.Resource (MonadResource)
+import Control.Monad.Trans.Resource (MonadResource, runResourceT)
+import qualified Vulkan.Core10.MemoryManagement as VkMem
 import Rort.Util.Resource (Resource)
 import qualified Rort.Util.Resource as Resource
 import qualified Vulkan.CStruct.Extends as Vk
 import Control.Monad (forM_)
 import Data.Vector (Vector)
+import qualified Data.Vector as Vector
 import Data.Word (Word32)
 import qualified Vulkan.Zero as Vk
+import Data.Bits ((.&.), shift)
+import Control.Monad.IO.Class (liftIO)
 
 withVkShaderModule
   :: MonadResource m
@@ -96,3 +101,115 @@ withVkCommandBuffers device allocInfo =
       Vk.deviceWaitIdle device
       *> Vk.freeCommandBuffers device (Vk.commandPool allocInfo) cmd
     )
+
+withVkBuffer
+  :: MonadResource m
+  => Vk.Device
+  -> Vk.BufferCreateInfo '[]
+  -> m (Resource Vk.Buffer)
+withVkBuffer device createInfo =
+  Resource.allocate
+    (Vk.createBuffer device createInfo Nothing)
+    (\buffer -> Vk.destroyBuffer device buffer Nothing)
+
+withVkBufferMemory
+  :: MonadResource m
+  => Vk.PhysicalDevice
+  -> Vk.Device
+  -> Vk.Buffer
+  -> Vk.MemoryPropertyFlagBits
+  -> m (Resource VkMem.DeviceMemory)
+withVkBufferMemory physDevice device buf memProperties = do
+  memRequirements <- liftIO $ Vk.getBufferMemoryRequirements device buf
+
+  typIx <- liftIO $ findMemoryType
+    physDevice
+    (VkMem.memoryTypeBits memRequirements)
+    memProperties
+
+  let
+    allocInfo = Vk.MemoryAllocateInfo
+      ()
+      (VkMem.size memRequirements)
+      typIx
+
+  Resource.allocate
+    (Vk.allocateMemory device allocInfo Nothing)
+    (\mem -> Vk.freeMemory device mem Nothing)
+
+findMemoryType
+  :: Vk.PhysicalDevice
+  -> Word32
+  -> Vk.MemoryPropertyFlagBits
+  -> IO Word32
+findMemoryType physDevice typeFilter properties = do
+  memProperties <- Vk.getPhysicalDeviceMemoryProperties physDevice
+
+  let
+    typs = flip foldMap (zip [0..] $ Vector.toList $ Vk.memoryTypes memProperties) $ \(ix :: Word32, typ) -> do
+      let suitableMemType = typeFilter .&. (1 `shift` fromIntegral ix) /= 0
+      if suitableMemType && Vk.propertyFlags typ == properties
+      then [ix]
+      else mempty
+
+  case typs of
+    [] -> error $ "Unable to find suitable memory type for buffer: (" <> show typeFilter <> ", " <> show (Vector.length $ Vk.memoryTypes memProperties) <> ")"
+    (t:_ts) -> pure t
+
+copyBuffer
+  :: Vk.Device
+  -- ^ Logical device
+  -> Vk.CommandPool
+  -- ^ Command buffer pool
+  -> Vk.Queue
+  -- ^ Queue to submit transfer operation on
+  -> Vk.DeviceSize
+  -- ^ Size of data to copy from src buffer
+  -> Vk.Buffer
+  -- ^ Src buffer
+  -> Vk.Buffer
+  -- ^ Dst buffer
+  -> IO ()
+copyBuffer device cmdPool que size bufferSrc bufferDst = runResourceT $ do
+  let
+    allocInfo =
+      Vk.CommandBufferAllocateInfo
+        cmdPool
+        Vk.COMMAND_BUFFER_LEVEL_PRIMARY -- level
+        1 -- count
+
+  commandBuffers <- withVkCommandBuffers device allocInfo
+  let
+    commandBuffer = Vector.head $ Resource.get commandBuffers
+    beginInfo = Vk.CommandBufferBeginInfo
+      ()
+      Vk.COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
+      Nothing -- inheritance info
+
+  liftIO $ Vk.beginCommandBuffer commandBuffer beginInfo
+
+  let
+    copyRegion =
+      Vk.BufferCopy
+        0 -- src offset
+        0 -- dst offset
+        size -- size
+
+  liftIO $
+    Vk.cmdCopyBuffer
+      commandBuffer
+      bufferSrc
+      bufferDst
+      (Vector.singleton copyRegion)
+
+  liftIO $ Vk.endCommandBuffer commandBuffer
+  let
+    submitInfo = Vk.SubmitInfo
+      ()
+      mempty -- wait semaphores
+      mempty -- wait dst stage mask
+      (Vector.singleton (Vk.commandBufferHandle commandBuffer)) -- commandBuffers
+      mempty -- signal semaphores
+
+  liftIO $ Vk.queueSubmit que (Vector.singleton $ Vk.SomeStruct submitInfo) Vk.NULL_HANDLE
+  liftIO $ Vk.queueWaitIdle que
