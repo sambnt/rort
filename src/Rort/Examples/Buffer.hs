@@ -223,7 +223,7 @@ main = do
         let
           -- loop :: ResourceT IO ()
           loop = do
-            withNextFrameInFlight swapchain $ \fs -> do
+            withNextFrameInFlight swapchain $ \fs -> runResourceT $ do
               void $ Vk.waitForFences
                 (vkDevice ctx)
                 (Vector.singleton $ fsFenceInFlight fs)

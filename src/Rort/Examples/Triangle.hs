@@ -124,7 +124,7 @@ main = do
         -- rendering a frame
         let
           loop = do
-            withNextFrameInFlight swapchain $ \fs -> do
+            withNextFrameInFlight swapchain $ \fs -> runResourceT $ do
               void $ Vk.waitForFences
                 (vkDevice ctx)
                 (Vector.singleton $ fsFenceInFlight fs)
