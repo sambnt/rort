@@ -1,8 +1,14 @@
-module Rort.Util.Resource (Resource, get, free, allocate, fromResourceT) where
+module Rort.Util.Resource ( Resource
+                          , get
+                          , free
+                          , allocate
+                          , fromResourceT
+                          ) where
 
 import Control.Monad.Trans.Resource (MonadResource, ReleaseKey)
 import qualified Control.Monad.Trans.Resource as ResourceT
 
+-- TODO: Revisit this type, use Acquire
 data Resource a = Resource a (IO ())
 
 instance Functor Resource where
@@ -11,17 +17,17 @@ instance Functor Resource where
 instance Applicative Resource where
   pure a = Resource a (pure ())
   (Resource rf rfFree) <*> (Resource ra raFree) =
-    Resource (rf ra) (rfFree >> raFree)
+    Resource (rf ra) (rfFree <> raFree)
 
 instance Monad Resource where
   (Resource ma maFree) >>= f =
     let
       (Resource mb mbFree) = f ma
     in
-      Resource mb (maFree >> mbFree)
+      Resource mb (maFree <> mbFree)
 
 get :: Resource a -> a
-get (Resource a _) = a
+get (Resource a _ ) = a
 
 free :: Resource a -> IO ()
 free (Resource _ rFree) = rFree

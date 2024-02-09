@@ -108,11 +108,6 @@ main = do
                              ]
             )
 
-      copyCmdPool <-
-        withVkCommandPool
-          (vkDevice ctx)
-          (NE.head . graphicsQueueFamilies $ vkQueueFamilies ctx)
-
       let
         vertices :: [Float]
         vertices = [ -0.5, -0.5, 1, 0, 0
@@ -179,12 +174,17 @@ main = do
         (Resource.get deviceBufferMem)
         0 -- offset
 
+      copyCmdPool <-
+        withVkCommandPool
+          (vkDevice ctx)
+          (NE.head . graphicsQueueFamilies $ vkQueueFamilies ctx)
+
       liftIO $ copyBuffer
         (vkDevice ctx)
         (Resource.get copyCmdPool)
         (vkGraphicsQueue ctx)
         (vertexBufferSize + indexBufferSize)
-        (Resource.get stagingBuffer)
+       (Resource.get stagingBuffer)
         (Resource.get deviceBuffer)
 
       startTime <- liftIO Chronos.now

@@ -13,7 +13,6 @@ import Control.Monad.IO.Class (liftIO)
 import qualified Data.ByteString as BS
 import qualified Data.List.NonEmpty as NE
 import Rort.Render.Swapchain (withSwapchain, vkSwapchain, retryOnSwapchainOutOfDate)
-import Rort.Render.FramesInFlight (withNextFrameInFlight, withFramesInFlight, FrameInFlight (..))
 import Rort.Vulkan (withVkShaderModule, withVkCommandBuffers, withVkCommandPool, withVkBuffer, withVkBufferMemory, copyBuffer)
 import qualified Vulkan.Zero as Vk
 import qualified Rort.Util.Resource as Resource
@@ -23,6 +22,7 @@ import Rort.Render (mkFrameData, recordFrameData, finallyPresent)
 import Control.Monad (when)
 import Foreign (sizeOf, Word16, castPtr, pokeArray, advancePtr)
 import Rort.Window.Types (WindowEvent(..))
+import Rort.Render.FramesInFlight (withFramesInFlight, withNextFrameInFlight, FrameInFlight (FrameInFlight))
 
 main :: IO ()
 main = do
@@ -50,12 +50,12 @@ main = do
 
       ctx <- withVkContext cfg win
 
-      vertShaderCode <- liftIO $ BS.readFile "data/vertexBuffers.vert.spv"
-      fragShaderCode <- liftIO $ BS.readFile "data/tri.frag.spv"
-
       let numFramesInFlight = 2
       framesInFlight <-
         withFramesInFlight (vkDevice ctx) (vkQueueFamilies ctx) numFramesInFlight
+
+      vertShaderCode <- liftIO $ BS.readFile "data/vertexBuffers.vert.spv"
+      fragShaderCode <- liftIO $ BS.readFile "data/tri.frag.spv"
 
       framebufferSize <- liftIO $ vkGetFramebufferSize ctx
       initialSwapchain <-
@@ -85,11 +85,6 @@ main = do
               "main"
               Nothing
           ]
-
-      copyCmdPool <-
-        withVkCommandPool
-          (vkDevice ctx)
-          (NE.head . graphicsQueueFamilies $ vkQueueFamilies ctx)
 
       let
         vertices :: [Float]
@@ -156,6 +151,11 @@ main = do
         (Resource.get deviceBuffer)
         (Resource.get deviceBufferMem)
         0 -- offset
+
+      copyCmdPool <-
+        withVkCommandPool
+          (vkDevice ctx)
+          (NE.head . graphicsQueueFamilies $ vkQueueFamilies ctx)
 
       liftIO $ copyBuffer
         (vkDevice ctx)
@@ -261,4 +261,3 @@ main = do
               Nothing -> pure True
             when shouldContinue loop
         loop
-

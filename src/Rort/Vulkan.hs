@@ -168,25 +168,26 @@ withVkDescriptorSet device allocInfo = fmap Vector.toList
         -- TODO: Not recommended to free descriptor sets, just free pool
         (Vk.freeDescriptorSets device (Vk.descriptorPool allocInfo))
 
-withFence
+withVkFence
   :: MonadResource m
   => Vk.Device
   -> Vk.FenceCreateInfo '[]
   -> m (Resource Vk.Fence)
-withFence logicalDevice fenceInfo =
-    Resource.allocate
-      (Vk.createFence logicalDevice fenceInfo Nothing)
-      (\fence -> Vk.destroyFence logicalDevice fence Nothing)
+withVkFence logicalDevice fenceInfo =
+  Resource.allocate
+    (Vk.createFence logicalDevice fenceInfo Nothing)
+    (\fence -> Vk.destroyFence logicalDevice fence Nothing)
 
-withSemaphore
+withVkSemaphore
   :: MonadResource m
   => Vk.Device
   -> Vk.SemaphoreCreateInfo '[]
   -> m (Resource Vk.Semaphore)
-withSemaphore logicalDevice semaphoreInfo =
-    Resource.allocate
-      (Vk.createSemaphore logicalDevice semaphoreInfo Nothing)
-      (\sem -> Vk.destroySemaphore logicalDevice sem Nothing)
+withVkSemaphore logicalDevice semaphoreInfo =
+  Resource.allocate
+    (Vk.createSemaphore logicalDevice semaphoreInfo Nothing)
+    (\sem -> Vk.destroySemaphore logicalDevice sem Nothing)
+
 
 findMemoryType
   :: Vk.PhysicalDevice

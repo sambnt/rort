@@ -9,7 +9,7 @@ import Control.Monad.Trans.Resource (MonadResource)
 import Data.Word (Word32)
 import Control.Monad (replicateM_)
 import qualified Vulkan.Zero as Vk
-import Rort.Vulkan (withFence, withSemaphore, withVkDescriptorPool, withVkCommandPool)
+import Rort.Vulkan (withVkFence, withVkSemaphore, withVkDescriptorPool, withVkCommandPool)
 import Rort.Util.Resource (Resource)
 import qualified Rort.Util.Resource as Resource
 import qualified Data.Vector as Vector
@@ -161,9 +161,9 @@ withFrameSync logicalDevice = do
     -- drawing, we don't wait forever.
     fenceInfo = Vk.FenceCreateInfo () Vk.FENCE_CREATE_SIGNALED_BIT
     semaphoreInfo = Vk.SemaphoreCreateInfo () Vk.zero
-  inFlightFence <- withFence logicalDevice fenceInfo
-  renderFinishedSem <- withSemaphore logicalDevice semaphoreInfo
-  imageAvailableSem <- withSemaphore logicalDevice semaphoreInfo
+  inFlightFence <- withVkFence logicalDevice fenceInfo
+  renderFinishedSem <- withVkSemaphore logicalDevice semaphoreInfo
+  imageAvailableSem <- withVkSemaphore logicalDevice semaphoreInfo
   pure $ FrameSync
     <$> inFlightFence
     <*> imageAvailableSem

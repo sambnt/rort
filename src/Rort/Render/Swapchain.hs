@@ -5,8 +5,7 @@ module Rort.Render.Swapchain where
 
 import qualified Vulkan as Vk
 import qualified Vulkan.Exception as Vk
-import Control.Monad.Trans.Resource (MonadResource, runResourceT, MonadUnliftIO)
-import qualified Control.Monad.Trans.Resource as ResourceT
+import Control.Monad.Trans.Resource (MonadResource, MonadUnliftIO)
 import qualified Vulkan.Zero as Vk
 import Rort.Vulkan.Context (VkContext, vkDevice, swapchainSupportCapabilities, swapchainSupportPresentModes, querySwapchainSupport, swapchainSupportFormats, vkSurface, vkPhysicalDevice, graphicsQueueFamilies, presentationQueueFamilies, vkQueueFamilies, vkGetFramebufferSize)
 import Data.Word (Word32)
@@ -83,6 +82,7 @@ retryOnSwapchainOutOfDate ctx initialSwapchain f = do
 
 withSwapchain
   :: MonadResource m
+  -- TODO: Don't give context to swapchain
   => VkContext
   -> (Int, Int) -- ^ Frame buffer size
   -> Maybe Swapchain -- ^ Old swapchain
