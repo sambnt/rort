@@ -68,6 +68,7 @@ library
                   , Rort.Render.Swapchain
                   , Rort.Render
                   , Rort.Util.Resource
+                  , Rort.Allocator
 
 executable rort
     import:           project-config

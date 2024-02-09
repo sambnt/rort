@@ -1,4 +1,6 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE OverloadedRecordDot #-}
+
 module Rort.Vulkan.Context where
 
 import Control.Monad.Trans.Resource (MonadResource)
@@ -22,6 +24,9 @@ import Data.Bits ((.&.))
 import qualified Vulkan.CStruct.Extends as Vk
 import Data.Function ((&))
 import qualified Data.Set as Set
+import Rort.Allocator (Allocator)
+import qualified Rort.Allocator as Allocator
+import qualified Rort.Util.Resource as Resource
 
 data VkContext = VkContext { vkInstance           :: Vk.Instance
                            , vkSurface            :: Vk.SurfaceKHR
@@ -33,6 +38,7 @@ data VkContext = VkContext { vkInstance           :: Vk.Instance
                            , vkPresentationQueue  :: Vk.Queue
                            , vkGraphicsQueue      :: Vk.Queue
                            , vkTransferQueue      :: Vk.Queue
+                           , vkAllocator          :: Allocator
                            }
 
 data VkSettings
@@ -89,6 +95,9 @@ withVkContext cfg win = do
           queFamilies
           deviceExts
 
+      allocator <- Allocator.withAllocator
+        physicalDevice logicalDevice inst cfg.applicationInfo.apiVersion
+
       props <- Vk.getPhysicalDeviceProperties physicalDevice
       let samples = getMaxUsableSampleCount props
 
@@ -118,6 +127,7 @@ withVkContext cfg win = do
                        , vkPresentationQueue  = presentQueue
                        , vkGraphicsQueue      = gfxQueue
                        , vkTransferQueue      = transferQueue
+                       , vkAllocator          = Resource.get allocator
                        }
 withInstance
   :: MonadResource m
