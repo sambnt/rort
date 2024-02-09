@@ -102,6 +102,8 @@ withUniformBuffer allocator size = do
   memPropFlags
     <- liftIO $ Vma.getAllocationMemoryProperties (vmaAllocator allocator) alloc
 
+  -- TODO: Handle non-host-visible memory
+
   liftIO $ do
     print allocInfo
     print memPropFlags

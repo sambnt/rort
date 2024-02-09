@@ -92,46 +92,6 @@ main = do
               Nothing
           ]
 
-      setLayout <- withVkDescriptorSetLayout (vkDevice ctx)
-        $ Vk.DescriptorSetLayoutCreateInfo
-            ()
-            Vk.zero
-            (Vector.fromList [ Vk.DescriptorSetLayoutBinding
-                                 0 -- binding in shader
-                                 Vk.DESCRIPTOR_TYPE_UNIFORM_BUFFER
-                                 1 -- descriptor count
-                                 Vk.SHADER_STAGE_VERTEX_BIT
-                                 Vector.empty -- immutable samplers
-                             ]
-            )
-
-      pipelineLayout <-
-        withVkPipelineLayout (vkDevice ctx)
-          $ Vk.PipelineLayoutCreateInfo
-              Vk.zero
-              -- set layouts
-              (Vector.singleton $ Resource.get setLayout)
-              -- push constant ranges
-              Vector.empty
-
-      descriptorPool <- withVkDescriptorPool (vkDevice ctx)
-        $ Vk.DescriptorPoolCreateInfo
-            ()
-            Vk.DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT
-            -- TODO: One set for each frame in flight
-            1 -- max sets that can be allocated
-            (Vector.fromList [
-              Vk.DescriptorPoolSize Vk.DESCRIPTOR_TYPE_UNIFORM_BUFFER 1
-            ])
-
-      -- TODO: Make one set for each frame
-      sets <-
-        withVkDescriptorSet (vkDevice ctx)
-          $ Vk.DescriptorSetAllocateInfo
-              ()
-              (Resource.get descriptorPool)
-              (Vector.singleton $ Resource.get setLayout)
-
       cmdPool <-
         withVkCommandPool
           (vkDevice ctx)
@@ -218,7 +178,14 @@ main = do
         let
           subpassInfo =
             SubpassInfo { subpassInfoShaderStages = pipelineShaderStages
-                        , subpassInfoPipelineLayout = Resource.get pipelineLayout
+                        , subpassInfoDescriptors =
+                            [ Vk.DescriptorSetLayoutBinding
+                                0 -- binding in shader
+                                Vk.DESCRIPTOR_TYPE_UNIFORM_BUFFER
+                                1 -- descriptor count
+                                Vk.SHADER_STAGE_VERTEX_BIT
+                                Vector.empty -- immutable samplers
+                            ]
                         , subpassInfoVertexBindings =
                             [ Vk.VertexInputBindingDescription
                                 0 -- first vertex buffer bound
@@ -312,18 +279,6 @@ main = do
                 -- descriptor copies
                 mempty
 
-
-              currentTime <- liftIO Chronos.now
-              let
-                newUniformBufferData =
-                  getUniformBufferData
-                    startTime
-                    currentTime
-                    ( fromIntegral . Extent2D.width $ vkExtent swapchain
-                    , fromIntegral . Extent2D.height $ vkExtent swapchain
-                    )
-              liftIO $ pokeArray (castPtr @() @(M44 Float) $ uniformBufferPtr) newUniformBufferData
-
               cmdBuffers <-
                 withVkCommandBuffers
                   (vkDevice ctx)
@@ -344,13 +299,16 @@ main = do
               let
                 frameData = Resource.get frameDatas !! fromIntegral imageIndex
 
-              Vk.cmdBindDescriptorSets
-                cmdBuffer
-                Vk.PIPELINE_BIND_POINT_GRAPHICS
-                (Resource.get pipelineLayout)
-                0 -- first set
-                (Vector.singleton $ head $ Resource.get sets)
-                mempty -- dynamic offsets
+              currentTime <- liftIO Chronos.now
+              let
+                newUniformBufferData =
+                  getUniformBufferData
+                    startTime
+                    currentTime
+                    ( fromIntegral . Extent2D.width $ vkExtent swapchain
+                    , fromIntegral . Extent2D.height $ vkExtent swapchain
+                    )
+              liftIO $ pokeArray (castPtr @() @(M44 Float) $ uniformBufferPtr) newUniformBufferData
 
               recordFrameData cmdBuffer swapchain frameData
 

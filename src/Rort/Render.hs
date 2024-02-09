@@ -1,16 +1,19 @@
+{-# LANGUAGE OverloadedRecordDot #-}
+
 module Rort.Render where
 
 import Control.Monad.Trans.Resource (MonadResource)
 import Rort.Vulkan.Context (VkContext)
 import Rort.Render.Swapchain (Swapchain, vkSurfaceFormat, vkImageViews, vkExtent)
-import Rort.Render.Types (RenderPassInfo, FrameData, DrawCall (PrimitiveDraw, IndexedDraw), Subpass (Subpass), DrawCallPrimitive(..), RenderPass(..), frameRenderPasses, FrameData(FrameData))
+import Rort.Render.Types (RenderPassInfo, FrameData, DrawCall (PrimitiveDraw, IndexedDraw), Subpass (Subpass, subpassDraw, subpassPipeline, subpassDescriptorSetLayout), DrawCallPrimitive(..), RenderPass(..), frameRenderPasses, FrameData(FrameData), subpassPipelineLayout)
 import Rort.Util.Resource (Resource)
 import qualified Vulkan as Vk
 import qualified Vulkan.Zero as Vk
 import qualified Data.Vector as Vector
+import qualified Data.Map.Strict as Map
 import qualified Vulkan.Core10.FundamentalTypes as Extent2D (Extent2D(width, height))
 import Rort.Vulkan.Context (VkContext (..))
-import Rort.Vulkan (withVkRenderPass, withVkGraphicsPipelines, withVkFramebuffer)
+import Rort.Vulkan (withVkRenderPass, withVkGraphicsPipelines, withVkFramebuffer, withVkDescriptorPool, withVkPipelineLayout, withVkDescriptorSetLayout)
 import qualified Vulkan.Extensions.VK_KHR_surface as VkFormat
 import qualified Rort.Util.Resource as Resource
 import qualified Vulkan.CStruct.Extends as Vk
@@ -19,6 +22,9 @@ import Control.Monad (forM, forM_, unless)
 import Data.Functor ((<&>))
 import Rort.Render.Types (SubpassInfo(..), Draw (..), DrawCallIndexed (..), BufferRef (..), RenderPassInfo (..))
 import Control.Monad.IO.Class (MonadIO)
+import Data.Map.Strict (Map)
+import Data.Word (Word32)
+import Data.Vector (Vector)
 
 mkFrameData
   :: MonadResource m
@@ -68,10 +74,37 @@ mkFrameData ctx swapchain renderPassInfos = do
                    Vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT -- dst access mask
                    Vk.zero -- dependency flags
                )
-    let
-      pipelineCreateInfos =
-        (zip [0..] $ renderPassInfoSubpasses renderPassInfo) <&> \(subpassIx, subpassInfo) ->
-          Vk.GraphicsPipelineCreateInfo () Vk.zero
+
+    subpasses <-
+      forM (zip [0..] $ renderPassInfoSubpasses renderPassInfo) $ \(subpassIx, subpassInfo) -> do
+        mSetLayout <-
+          case subpassInfoDescriptors subpassInfo of
+            [] ->
+              pure Nothing
+            setLayoutBindings ->
+              fmap Just <$> withVkDescriptorSetLayout (vkDevice ctx)
+                $ Vk.DescriptorSetLayoutCreateInfo
+                    ()
+                    Vk.zero
+                    (Vector.fromList $ setLayoutBindings)
+
+        pipelineLayout <-
+          withVkPipelineLayout (vkDevice ctx)
+            $ Vk.PipelineLayoutCreateInfo
+                Vk.zero
+                -- set layouts
+                -- TODO: multiple set layouts
+                (case mSetLayout of
+                   Nothing ->
+                     Vector.empty
+                   Just setLayout ->
+                     Vector.singleton $ Resource.get setLayout
+                )
+                -- push constant ranges
+                Vector.empty
+
+        let
+          pipelineCreateInfo = Vk.GraphicsPipelineCreateInfo () Vk.zero
             (fromIntegral $ length $ subpassInfoShaderStages subpassInfo)
             (fmap Vk.SomeStruct . Vector.fromList $ subpassInfoShaderStages subpassInfo)
             ( Just . Vk.SomeStruct
@@ -168,32 +201,29 @@ mkFrameData ctx swapchain renderPassInfos = do
                                      ]
                     )
             )
-            (subpassInfoPipelineLayout subpassInfo)
+            (Resource.get pipelineLayout)
             (Resource.get rp)
             subpassIx -- subpass index
             Vk.NULL_HANDLE -- pipeline handle (inheritance)
             (-1) -- pipeline index (inheritance)
 
-    pipelines <-
-      withVkGraphicsPipelines
-        (vkDevice ctx)
-        Vk.NULL_HANDLE
-        (Vector.fromList pipelineCreateInfos)
+        pipeline <-
+          fmap Vector.head <$> withVkGraphicsPipelines
+            (vkDevice ctx)
+            Vk.NULL_HANDLE
+            (Vector.singleton pipelineCreateInfo)
 
-    let
-      subpasses = do
-        ps <- pipelines
-        pure $ zip
-          (renderPassInfoSubpasses renderPassInfo)
-          (Vector.toList ps)
-          <&> \(subpassInfo, pipeline) ->
-            Subpass pipeline (subpassInfoDraw subpassInfo)
+        pure $ Subpass
+          <$> pipeline
+          <*> pipelineLayout
+          <*> sequence mSetLayout
+          <*> (pure $ subpassInfoDraw subpassInfo)
 
-    pure $ RenderPass <$> rp <*> subpasses
+    pure $ RenderPass <$> rp <*> sequence subpasses
 
   frameDatas <-
     forM (Vector.toList $ vkImageViews swapchain) $ \iv -> do
-      fmap (fmap FrameData . sequence) <$> forM renderPasses $ \rp -> do
+      frameRenderPasses <- fmap sequence <$> forM renderPasses $ \rp -> do
         framebuffer <- withVkFramebuffer (vkDevice ctx)
           $ Vk.FramebufferCreateInfo
             ()
@@ -205,6 +235,20 @@ mkFrameData ctx swapchain renderPassInfos = do
             (Extent2D.height $ vkExtent swapchain)
             1 -- layers
         pure $ (,) <$> framebuffer <*> rp
+
+      -- TODO: We only need one descriptor pool for each frame in flight, not
+      -- each swapchain image
+      let descriptorPoolSizes = getDescriptorPoolSizes renderPassInfos
+
+      descriptorPool <- withVkDescriptorPool (vkDevice ctx)
+        $ Vk.DescriptorPoolCreateInfo
+            ()
+            Vk.DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT
+            -- TODO: One set for each frame in flight
+            1 -- max sets that can be allocated
+            descriptorPoolSizes
+
+      pure $ FrameData <$> frameRenderPasses <*> descriptorPool
 
   pure $ sequence frameDatas
 
@@ -249,11 +293,12 @@ recordFrameData cmdBuffer swapchain frameData = do
       0
       (Vector.singleton scissor)
 
-    forM_ (renderPassSubpasses rp) $ \(Subpass pipeline draw) -> do
+    forM_ (renderPassSubpasses rp) $ \subpass -> do
+      let draw = subpassDraw subpass
       Vk.cmdBindPipeline
         cmdBuffer
         Vk.PIPELINE_BIND_POINT_GRAPHICS
-        pipeline
+        (subpassPipeline subpass)
 
       let
         (vertexBufs, vertexOffsets) =
@@ -273,6 +318,23 @@ recordFrameData cmdBuffer swapchain frameData = do
           offset
           indexType
 
+
+      unless (isJust $ drawDescriptors draw) $
+        let descBuffer = (drawDescriptor draw)
+        set <- withVkDescriptorSet
+          _device
+          $ Vk.DescriptorSetAllocateInfo
+              ()
+              _pool
+              (Vector.fromList $ subpassDescriptorSetLayout subpass)
+        Vk.cmdBindDescriptorSets
+          cmdBuffer
+          Vk.PIPELINE_BIND_POINT_GRAPHICS
+          (subpassPipelineLayout subpass)
+          0 -- first set
+          (Vector.fromList $ drawDescriptorSets draw)
+          mempty -- dynamic offsets
+
       case drawCall draw of
         (IndexedDraw (DrawCallIndexed indexCount instanceCount firstIndex vertexOffset firstInstance)) ->
           Vk.cmdDrawIndexed
@@ -282,3 +344,23 @@ recordFrameData cmdBuffer swapchain frameData = do
             cmdBuffer vertexCount instanceCount firstVertex firstInstance
 
     Vk.cmdEndRenderPass cmdBuffer
+
+getDescriptorPoolSizes
+  :: [RenderPassInfo]
+  -> Vector Vk.DescriptorPoolSize
+getDescriptorPoolSizes rps =
+  let
+    poolSizeMap :: Map Vk.DescriptorType Word32
+    poolSizeMap =
+      flip foldMap rps $ \rp ->
+        flip foldMap (renderPassInfoSubpasses rp) $ \sp ->
+          flip foldMap (subpassInfoDescriptors sp) $ \binding ->
+            Map.singleton binding.descriptorType
+                          binding.descriptorCount
+
+    poolSizes :: Vector Vk.DescriptorPoolSize
+    poolSizes =
+      Vector.fromList
+      $ Map.toList poolSizeMap <&> uncurry Vk.DescriptorPoolSize
+  in
+    poolSizes

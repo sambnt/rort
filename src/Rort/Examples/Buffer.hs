@@ -84,13 +84,6 @@ main = do
               Nothing
           ]
 
-      pipelineLayout <-
-        withVkPipelineLayout (vkDevice ctx)
-          $ Vk.PipelineLayoutCreateInfo
-              Vk.zero
-              Vector.empty -- set layouts
-              Vector.empty -- push constant ranges
-
       cmdPool <-
         withVkCommandPool
           (vkDevice ctx)
@@ -175,7 +168,7 @@ main = do
         let
           subpassInfo =
             SubpassInfo { subpassInfoShaderStages = pipelineShaderStages
-                        , subpassInfoPipelineLayout = Resource.get pipelineLayout
+                        , subpassInfoDescriptors = []
                         , subpassInfoVertexBindings =
                             [ Vk.VertexInputBindingDescription
                                 0 -- first vertex buffer bound

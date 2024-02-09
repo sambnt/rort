@@ -31,11 +31,13 @@ data Draw
   = Draw { drawCall :: DrawCall
          , drawVertexBuffers :: [BufferRef]
          , drawIndexBuffers  :: [(BufferRef, Vk.IndexType)]
+         -- TODO: Multiple descriptors
+         , drawDescriptor :: Maybe Vk.Buffer
          }
 
 data SubpassInfo
   = SubpassInfo { subpassInfoShaderStages     :: [Vk.PipelineShaderStageCreateInfo '[]]
-                , subpassInfoPipelineLayout   :: Vk.PipelineLayout
+                , subpassInfoDescriptors      :: [Vk.DescriptorSetLayoutBinding]
                 , subpassInfoVertexBindings   :: [Vk.VertexInputBindingDescription]
                 , subpassInfoVertexAttributes :: [Vk.VertexInputAttributeDescription]
                 , subpassInfoDraw             :: Draw
@@ -47,8 +49,10 @@ data RenderPassInfo
 
 -- output
 data Subpass
-  = Subpass { subpassPipeline :: Vk.Pipeline
-            , subpassDraw     :: Draw
+  = Subpass { subpassPipeline            :: Vk.Pipeline
+            , subpassPipelineLayout      :: Vk.PipelineLayout
+            , subpassDescriptorSetLayout :: Maybe Vk.DescriptorSetLayout
+            , subpassDraw                :: Draw
             }
 
 data RenderPass
@@ -58,4 +62,5 @@ data RenderPass
 
 data FrameData
   = FrameData { frameRenderPasses :: [(Vk.Framebuffer, RenderPass)]
+              , frameDescriptorPool :: Vk.DescriptorPool
               }
