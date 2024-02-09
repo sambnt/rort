@@ -10,7 +10,7 @@ import qualified Vulkan.Zero as Vk
 import qualified Data.Vector as Vector
 import qualified Vulkan.Core10.FundamentalTypes as Extent2D (Extent2D(width, height))
 import Rort.Vulkan.Context (VkContext (..))
-import Rort.Vulkan (withVkRenderPass, withVkGraphicsPipelines, withVkFramebuffer)
+import Rort.Vulkan (withVkRenderPass, withVkGraphicsPipelines, withVkFramebuffer, withVkPipelineLayout)
 import qualified Vulkan.Extensions.VK_KHR_surface as VkFormat
 import qualified Rort.Util.Resource as Resource
 import qualified Vulkan.CStruct.Extends as Vk
@@ -68,10 +68,18 @@ mkFrameData ctx swapchain renderPassInfos = do
                    Vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT -- dst access mask
                    Vk.zero -- dependency flags
                )
-    let
-      pipelineCreateInfos =
-        (zip [0..] $ renderPassInfoSubpasses renderPassInfo) <&> \(subpassIx, subpassInfo) ->
-          Vk.GraphicsPipelineCreateInfo () Vk.zero
+    subpasses <-
+      fmap sequence $ forM (zip [0..] $ renderPassInfoSubpasses renderPassInfo) $ \(subpassIx, subpassInfo) -> do
+        pipelineLayout <-
+          withVkPipelineLayout (vkDevice ctx)
+            $ Vk.PipelineLayoutCreateInfo
+                Vk.zero
+                -- set layouts
+                (Vector.fromList $ subpassInfoDescriptors subpassInfo)
+                -- push constant ranges
+                Vector.empty
+        let
+          pipelineCreateInfo = Vk.GraphicsPipelineCreateInfo () Vk.zero
             (fromIntegral $ length $ subpassInfoShaderStages subpassInfo)
             (fmap Vk.SomeStruct . Vector.fromList $ subpassInfoShaderStages subpassInfo)
             ( Just . Vk.SomeStruct
@@ -168,26 +176,23 @@ mkFrameData ctx swapchain renderPassInfos = do
                                      ]
                     )
             )
-            (subpassInfoPipelineLayout subpassInfo)
+            (Resource.get pipelineLayout)
             (Resource.get rp)
             subpassIx -- subpass index
             Vk.NULL_HANDLE -- pipeline handle (inheritance)
             (-1) -- pipeline index (inheritance)
 
-    pipelines <-
-      withVkGraphicsPipelines
-        (vkDevice ctx)
-        Vk.NULL_HANDLE
-        (Vector.fromList pipelineCreateInfos)
+        pipeline <-
+          fmap Vector.head <$> withVkGraphicsPipelines
+            (vkDevice ctx)
+            Vk.NULL_HANDLE
+            (Vector.singleton pipelineCreateInfo)
 
-    let
-      subpasses = do
-        ps <- pipelines
-        pure $ zip
-          (renderPassInfoSubpasses renderPassInfo)
-          (Vector.toList ps)
-          <&> \(subpassInfo, pipeline) ->
-            Subpass pipeline (subpassInfoDraw subpassInfo)
+        pure $
+          Subpass
+          <$> pipeline
+          <*> pipelineLayout
+          <*> pure (subpassInfoDraw subpassInfo)
 
     pure $ RenderPass <$> rp <*> subpasses
 
@@ -217,7 +222,7 @@ recordFrameData
 recordFrameData cmdBuffer swapchain frameData = do
   forM_ (frameRenderPasses frameData) $ \(framebuffer, rp) -> do
     let
-      clearValues = Vector.fromList [Vk.Color $ Vk.Float32 (254/255) (243/255) (215/255) 0]
+      clearValues = Vector.fromList [Vk.Color $ Vk.Float32 0 0 0 0]
       renderStartPos = Vk.Offset2D 0 0
       renderExtent = vkExtent swapchain
       renderPassBeginInfo =
@@ -249,7 +254,7 @@ recordFrameData cmdBuffer swapchain frameData = do
       0
       (Vector.singleton scissor)
 
-    forM_ (renderPassSubpasses rp) $ \(Subpass pipeline draw) -> do
+    forM_ (renderPassSubpasses rp) $ \(Subpass pipeline _pipelineLayout draw) -> do
       Vk.cmdBindPipeline
         cmdBuffer
         Vk.PIPELINE_BIND_POINT_GRAPHICS

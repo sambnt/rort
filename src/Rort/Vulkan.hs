@@ -137,6 +137,37 @@ withVkBufferMemory physDevice device buf memProperties = do
     (Vk.allocateMemory device allocInfo Nothing)
     (\mem -> Vk.freeMemory device mem Nothing)
 
+withVkDescriptorSetLayout
+  :: MonadResource m
+  => Vk.Device
+  -> Vk.DescriptorSetLayoutCreateInfo '[]
+  -> m (Resource Vk.DescriptorSetLayout)
+withVkDescriptorSetLayout device createInfo =
+  Resource.allocate
+    (Vk.createDescriptorSetLayout device createInfo Nothing)
+    (\dsl -> Vk.destroyDescriptorSetLayout device dsl Nothing)
+
+withVkDescriptorPool
+  :: MonadResource m
+  => Vk.Device
+  -> Vk.DescriptorPoolCreateInfo '[]
+  -> m (Resource Vk.DescriptorPool)
+withVkDescriptorPool device createInfo =
+  Resource.allocate
+    (Vk.createDescriptorPool device createInfo Nothing)
+    (\pool -> Vk.destroyDescriptorPool device pool Nothing)
+
+withVkDescriptorSet
+  :: MonadResource m
+  => Vk.Device
+  -> Vk.DescriptorSetAllocateInfo '[]
+  -> m (Resource [Vk.DescriptorSet])
+withVkDescriptorSet device allocInfo = fmap Vector.toList
+  <$> Resource.allocate
+        (Vk.allocateDescriptorSets device allocInfo)
+        -- TODO: Not recommended to free descriptor sets, just free pool
+        (Vk.freeDescriptorSets device (Vk.descriptorPool allocInfo))
+
 findMemoryType
   :: Vk.PhysicalDevice
   -> Word32

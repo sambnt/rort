@@ -1,8 +1,7 @@
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE OverloadedRecordDot #-}
 
-module Rort.Examples.Buffer where
+module Rort.Examples.Uniform where
 
 import Rort.Window (withWindow, getRequiredExtensions, getWindowEvent, closeWindow)
 import Rort.Vulkan.Context (withVkContext, VkSettings (..), VkContext (..), graphicsQueueFamilies)
@@ -10,20 +9,28 @@ import Control.Monad.Trans.Resource (runResourceT)
 import qualified Data.Vector as Vector
 import qualified Vulkan as Vk
 import Control.Monad.IO.Class (liftIO)
+import qualified Vulkan.Core10.FundamentalTypes as Extent2D (Extent2D(width, height))
 import qualified Data.ByteString as BS
 import qualified Data.List.NonEmpty as NE
-import Rort.Render.Swapchain (withSwapchain, fsFenceInFlight, withNextFrameInFlight, fsSemaphoreImageAvailable, vkSwapchain, throwSwapchainOutOfDate, fsSemaphoreRenderFinished, throwSwapchainSubOptimal, retryOnSwapchainOutOfDate)
-import Rort.Vulkan (withVkShaderModule, withVkPipelineLayout, withVkCommandBuffers, withVkCommandPool, withVkBuffer, withVkBufferMemory, copyBuffer)
+import Rort.Render.Swapchain (withSwapchain, fsFenceInFlight, withNextFrameInFlight, fsSemaphoreImageAvailable, vkSwapchain, throwSwapchainOutOfDate, fsSemaphoreRenderFinished, throwSwapchainSubOptimal, retryOnSwapchainOutOfDate, Swapchain (vkExtent))
+import Rort.Vulkan (withVkShaderModule, withVkPipelineLayout, withVkCommandBuffers, withVkCommandPool, withVkBuffer, withVkBufferMemory, copyBuffer, withVkDescriptorSetLayout, withVkDescriptorPool, withVkDescriptorSet)
 import qualified Vulkan.Zero as Vk
 import qualified Rort.Util.Resource as Resource
 import qualified Vulkan.CStruct.Extends as Vk
 import Data.Bits ((.|.))
-import Rort.Render.Types (SubpassInfo(..), RenderPassInfo(..), Draw(..), DrawCallIndexed(..), BufferRef (..), DrawCall (IndexedDraw))
+import Rort.Render.Types (SubpassInfo(..), RenderPassInfo(..), Draw(..), DrawCallIndexed(..), BufferRef (..), DrawCall (..), DrawCallPrimitive (..), Subpass (Subpass), RenderPass (renderPassSubpasses, renderPass), frameRenderPasses)
 import Rort.Render (mkFrameData, recordFrameData)
-import Control.Monad (when)
-import Data.Functor (void)
+import Control.Monad (when, unless, forM_)
+import Data.Functor (void, (<&>))
 import Foreign (nullPtr, sizeOf, Word16, castPtr, pokeArray, advancePtr)
 import Rort.Window.Types (WindowEvent(..))
+import Linear (M44, Quaternion)
+import qualified Linear
+import qualified Torsor
+import Data.Function ((&))
+import qualified Rort.Allocator as Allocator
+import qualified Chronos
+import Control.Lens ((%~))
 
 main :: IO ()
 main = do
@@ -31,7 +38,7 @@ main = do
     width = 800
     height = 600
 
-  withWindow width height "Example: Buffer" $ \win -> do
+  withWindow width height "Example: Uniform" $ \win -> do
     windowExts <- getRequiredExtensions win
 
     runResourceT $ do
@@ -42,7 +49,7 @@ main = do
                              Vector.fromList [ "VK_LAYER_KHRONOS_validation" ]
                          , applicationInfo =
                              Vk.ApplicationInfo
-                               (Just "Example: Buffer")  -- application name
+                               (Just "Example: Uniform")  -- application name
                                (Vk.MAKE_API_VERSION 1 0 0) -- application version
                                (Just "No engine")          -- engine name
                                (Vk.MAKE_API_VERSION 1 0 0) -- engine version
@@ -51,7 +58,13 @@ main = do
 
       ctx <- withVkContext cfg win
 
-      vertShaderCode <- liftIO $ BS.readFile "data/vertexBuffers.vert.spv"
+      allocator <- Allocator.withAllocator
+        (vkPhysicalDevice ctx)
+        (vkDevice ctx)
+        (vkInstance ctx)
+        cfg.applicationInfo.apiVersion
+
+      vertShaderCode <- liftIO $ BS.readFile "data/uniformBuffer.vert.spv"
       fragShaderCode <- liftIO $ BS.readFile "data/tri.frag.spv"
 
       let numFramesInFlight = 2
@@ -84,10 +97,45 @@ main = do
               Nothing
           ]
 
+      setLayout <- withVkDescriptorSetLayout (vkDevice ctx)
+        $ Vk.DescriptorSetLayoutCreateInfo
+            ()
+            Vk.zero
+            (Vector.fromList [ Vk.DescriptorSetLayoutBinding
+                                 0 -- binding in shader
+                                 Vk.DESCRIPTOR_TYPE_UNIFORM_BUFFER
+                                 1 -- descriptor count
+                                 Vk.SHADER_STAGE_VERTEX_BIT
+                                 Vector.empty -- immutable samplers
+                             ]
+            )
+
       cmdPool <-
         withVkCommandPool
           (vkDevice ctx)
           (NE.head . graphicsQueueFamilies $ vkQueueFamilies ctx)
+
+      descriptorPool <-
+        withVkDescriptorPool
+          (vkDevice ctx)
+          $ Vk.DescriptorPoolCreateInfo
+              ()
+              Vk.zero
+              1 -- max sets we can allocate from this pool
+              ( Vector.fromList
+                  [ Vk.DescriptorPoolSize Vk.DESCRIPTOR_TYPE_UNIFORM_BUFFER 1
+                  ]
+              )
+
+      set <-
+        -- Not recommended to free descriptor sets, just free pool. So we don't
+        -- setup a destructor here.
+        fmap Vector.head $ Vk.allocateDescriptorSets
+          (vkDevice ctx)
+          $ Vk.DescriptorSetAllocateInfo
+              ()
+              (Resource.get descriptorPool)
+              (Vector.singleton $ Resource.get setLayout)
 
       let
         vertices :: [Float]
@@ -168,7 +216,7 @@ main = do
         let
           subpassInfo =
             SubpassInfo { subpassInfoShaderStages = pipelineShaderStages
-                        , subpassInfoDescriptors = []
+                        , subpassInfoDescriptors = [ Resource.get setLayout ]
                         , subpassInfoVertexBindings =
                             [ Vk.VertexInputBindingDescription
                                 0 -- first vertex buffer bound
@@ -212,6 +260,8 @@ main = do
             [renderPassInfo]
         -- END swapchain-dependent
 
+
+        startTime <- liftIO Chronos.now
         -- rendering a frame
         let
           -- loop :: ResourceT IO ()
@@ -237,6 +287,48 @@ main = do
                 (vkDevice ctx)
                 (Vector.singleton $ fsFenceInFlight fs)
 
+              let
+                uniformBufferSize =
+                  fromIntegral $ 3 * sizeOf(undefined :: M44 Float)
+              (uniformBuffer, uniformBufferPtr) <- Resource.get
+                <$> Allocator.withUniformBuffer
+                      (Resource.get allocator)
+                      uniformBufferSize
+
+              Vk.updateDescriptorSets (vkDevice ctx)
+                -- writes
+                (fmap Vk.SomeStruct . Vector.singleton
+                 $  Vk.WriteDescriptorSet
+                      ()
+                      set -- dst set
+                      0 -- dst binding
+                      0 -- dst array element
+                      1 -- descriptor count
+                      Vk.DESCRIPTOR_TYPE_UNIFORM_BUFFER -- type
+                      mempty -- image info
+                      -- buffer info
+                      ( Vector.singleton $
+                          Vk.DescriptorBufferInfo
+                            uniformBuffer
+                            0 -- offset
+                            uniformBufferSize
+                      )
+                      mempty -- texel buffer view
+                )
+                -- copies
+                mempty
+
+              currentTime <- liftIO Chronos.now
+              let
+                newUniformBufferData =
+                  getUniformBufferData
+                    startTime
+                    currentTime
+                    ( fromIntegral . Extent2D.width $ vkExtent swapchain
+                    , fromIntegral . Extent2D.height $ vkExtent swapchain
+                    )
+              liftIO $ pokeArray (castPtr @() @(M44 Float) $ uniformBufferPtr) newUniformBufferData
+
               cmdBuffers <-
                 withVkCommandBuffers
                   (vkDevice ctx)
@@ -257,7 +349,81 @@ main = do
               let
                 frameData = Resource.get frameDatas !! fromIntegral imageIndex
 
-              recordFrameData cmdBuffer swapchain frameData
+              forM_ (frameRenderPasses frameData) $ \(framebuffer, rp) -> do
+                let
+                  clearValues = Vector.fromList [Vk.Color $ Vk.Float32 0 0 0 0]
+                  renderStartPos = Vk.Offset2D 0 0
+                  renderExtent = vkExtent swapchain
+                  renderPassBeginInfo =
+                    Vk.RenderPassBeginInfo
+                      ()
+                      (renderPass rp)
+                      framebuffer
+                      (Vk.Rect2D renderStartPos renderExtent)
+                      clearValues
+
+                Vk.cmdBeginRenderPass
+                  cmdBuffer renderPassBeginInfo Vk.SUBPASS_CONTENTS_INLINE
+
+                let
+                  viewport = Vk.Viewport
+                    0 -- startX
+                    0 -- startY
+                    (fromIntegral $ Extent2D.width renderExtent) -- width
+                    (fromIntegral $ Extent2D.height renderExtent) -- height
+                    0 -- min depth
+                    1 -- max depth
+                  scissor = Vk.Rect2D renderStartPos renderExtent
+                Vk.cmdSetViewport
+                  cmdBuffer
+                  0
+                  (Vector.singleton viewport)
+                Vk.cmdSetScissor
+                  cmdBuffer
+                  0
+                  (Vector.singleton scissor)
+
+                forM_ (renderPassSubpasses rp) $ \(Subpass pipeline pipelineLayout draw) -> do
+                  Vk.cmdBindPipeline
+                    cmdBuffer
+                    Vk.PIPELINE_BIND_POINT_GRAPHICS
+                    pipeline
+
+                  let
+                    (vertexBufs, vertexOffsets) =
+                      unzip
+                      $ drawVertexBuffers draw
+                      <&> \(BufferRef vertexBuf offset) -> (vertexBuf, offset)
+                  unless (null vertexBufs) $
+                    Vk.cmdBindVertexBuffers
+                      cmdBuffer
+                      0 -- first binding
+                      (Vector.fromList vertexBufs)
+                      (Vector.fromList vertexOffsets)
+                  forM_ (drawIndexBuffers draw) $ \(BufferRef indexBuf offset, indexType) -> do
+                    Vk.cmdBindIndexBuffer
+                      cmdBuffer
+                      indexBuf
+                      offset
+                      indexType
+
+                  Vk.cmdBindDescriptorSets
+                    cmdBuffer
+                    Vk.PIPELINE_BIND_POINT_GRAPHICS
+                    pipelineLayout
+                    0 -- first set
+                    (Vector.singleton set)
+                    mempty -- dynamic offsets
+
+                  case drawCall draw of
+                    (IndexedDraw (DrawCallIndexed indexCount instanceCount firstIndex vertexOffset firstInstance)) ->
+                      Vk.cmdDrawIndexed
+                        cmdBuffer indexCount instanceCount firstIndex vertexOffset firstInstance
+                    (PrimitiveDraw (DrawCallPrimitive firstVertex firstInstance instanceCount vertexCount)) ->
+                      Vk.cmdDraw
+                        cmdBuffer vertexCount instanceCount firstVertex firstInstance
+
+                Vk.cmdEndRenderPass cmdBuffer
 
               Vk.endCommandBuffer cmdBuffer
 
@@ -303,3 +469,35 @@ main = do
             when shouldContinue loop
         loop
 
+getUniformBufferData
+  :: Chronos.Time -> Chronos.Time -> (Int, Int) -> [M44 Float]
+getUniformBufferData startTime currentTime (w, h) = do
+  -- This is an abstract time unit, not seconds, not nanoseconds, it's abstract.
+  let
+    timePassed = currentTime `Torsor.difference` startTime
+
+    asFloat = fromIntegral . Chronos.getTimespan
+
+    rotQ :: Linear.Quaternion Float
+    rotQ = Linear.axisAngle (Linear.V3 0 0 1) (asFloat timePassed * ((pi / 2) / asFloat Chronos.second))
+
+    model :: M44 Float
+    model = Linear.transpose $ Linear.mkTransformation rotQ (Linear.V3 0 0 0)
+
+    view :: M44 Float
+    view = Linear.transpose $ Linear.lookAt
+      (Linear.V3 2 2 2) -- Eye position
+      (Linear.V3 0 0 0) -- Looking at
+      (Linear.V3 0 0 1) -- Up direction
+
+    proj :: M44 Float
+    proj = Linear.perspective
+      (45.0 * pi / 180.0) -- FOV y in radians
+      (fromIntegral w / fromIntegral h)
+      0.1 -- Near plane
+      10  -- Far plane
+      & Linear.transpose
+      & Linear._y . Linear._y %~ (* (-1))
+
+    in
+      [model, view, proj]

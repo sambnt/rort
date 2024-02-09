@@ -35,7 +35,7 @@ data Draw
 
 data SubpassInfo
   = SubpassInfo { subpassInfoShaderStages     :: [Vk.PipelineShaderStageCreateInfo '[]]
-                , subpassInfoPipelineLayout   :: Vk.PipelineLayout
+                , subpassInfoDescriptors      :: [Vk.DescriptorSetLayout]
                 , subpassInfoVertexBindings   :: [Vk.VertexInputBindingDescription]
                 , subpassInfoVertexAttributes :: [Vk.VertexInputAttributeDescription]
                 , subpassInfoDraw             :: Draw
@@ -48,6 +48,7 @@ data RenderPassInfo
 -- output
 data Subpass
   = Subpass { subpassPipeline :: Vk.Pipeline
+            , subpassPipelineLayout :: Vk.PipelineLayout
             , subpassDraw     :: Draw
             }
 
