@@ -215,6 +215,8 @@ main = do
         (Resource.get stagingBuffer)
         (Resource.get deviceBuffer)
 
+      startTime <- liftIO Chronos.now
+
       retryOnSwapchainOutOfDate ctx initialSwapchain $ \swapchain -> do
         -- BEGIN swapchain-dependent
         let
@@ -265,7 +267,6 @@ main = do
         -- END swapchain-dependent
 
 
-        startTime <- liftIO Chronos.now
         -- rendering a frame
         let
           -- loop :: ResourceT IO ()
