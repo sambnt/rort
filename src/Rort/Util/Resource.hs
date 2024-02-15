@@ -1,14 +1,12 @@
 module Rort.Util.Resource (Resource, get, free, allocate, fromResourceT) where
 
-import Data.Acquire (Acquire, allocateAcquire, mkAcquire)
 import Control.Monad.Trans.Resource (MonadResource, ReleaseKey)
 import qualified Control.Monad.Trans.Resource as ResourceT
-import Control.Monad.IO.Class (MonadIO)
 
 data Resource a = Resource a (IO ())
 
 instance Functor Resource where
-  fmap f (Resource a free)  = Resource (f a) free
+  fmap f (Resource a fre)  = Resource (f a) fre
 
 instance Applicative Resource where
   pure a = Resource a (pure ())

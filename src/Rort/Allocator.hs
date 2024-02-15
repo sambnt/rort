@@ -3,7 +3,7 @@
 module Rort.Allocator where
 
 import qualified VulkanMemoryAllocator as Vma
-import Foreign (nullPtr, castFunPtr, (.&.), (.|.))
+import Foreign (nullPtr, castFunPtr, (.|.))
 import qualified Vulkan.Zero as Vk
 import qualified Vulkan.Core10.DeviceInitialization as Vk
 import Data.Word (Word32, Word64)
@@ -108,7 +108,7 @@ withUniformBuffer allocator size = do
 
   let (_buf, alloc, _allocInfo) = Resource.get allocation
 
-  memPropFlags
+  _memPropFlags
      <- liftIO $ Vma.getAllocationMemoryProperties allocator alloc
 
   -- TODO: Handle non-host-visible memory
