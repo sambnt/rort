@@ -10,17 +10,14 @@ import qualified Data.Vector as Vector
 import qualified Vulkan as Vk
 import Control.Monad.IO.Class (liftIO)
 import qualified Data.ByteString as BS
-import Rort.Render.Swapchain (withSwapchain, vkSwapchain, throwSwapchainOutOfDate, throwSwapchainSubOptimal, retryOnSwapchainOutOfDate)
-import Rort.Render.FramesInFlight (withNextFrameInFlight, withFramesInFlight, fsSemaphoreRenderFinished, fsSemaphoreImageAvailable, fsFenceInFlight, FrameInFlight (FrameInFlight))
+import Rort.Render.Swapchain (withSwapchain, vkSwapchain, retryOnSwapchainOutOfDate)
+import Rort.Render.FramesInFlight (withNextFrameInFlight, withFramesInFlight, FrameInFlight (FrameInFlight))
 import Rort.Vulkan (withVkShaderModule, withVkCommandBuffers)
 import qualified Vulkan.Zero as Vk
 import qualified Rort.Util.Resource as Resource
-import qualified Vulkan.CStruct.Extends as Vk
 import Control.Monad (when)
-import Data.Functor (void)
-import Foreign (nullPtr)
 import Rort.Window.Types (WindowEvent(..))
-import Rort.Render (recordFrameData, mkFrameData)
+import Rort.Render (recordFrameData, mkFrameData, finallyPresent)
 import Rort.Render.Types (Draw(..), SubpassInfo (..), DrawCallPrimitive (..), DrawCall (PrimitiveDraw), RenderPassInfo (RenderPassInfo))
 
 main :: IO ()
@@ -116,74 +113,31 @@ main = do
         let
           loop = do
             withNextFrameInFlight (vkDevice ctx) framesInFlight $ \(FrameInFlight fs _descPool cmdPool) -> runResourceT $ do
-              void $ Vk.waitForFences
-                (vkDevice ctx)
-                (Vector.singleton $ fsFenceInFlight fs)
-                True
-                maxBound
+              finallyPresent (vkDevice ctx) (vkGraphicsQueue ctx) (vkPresentationQueue ctx) (vkSwapchain swapchain) fs $ \imageIndex -> do
+                cmdBuffers <-
+                  withVkCommandBuffers
+                    (vkDevice ctx)
+                    $ Vk.CommandBufferAllocateInfo
+                        cmdPool
+                        -- Primary = can be submitted to queue for execution, can't be
+                        -- called by other command buffers.
+                        Vk.COMMAND_BUFFER_LEVEL_PRIMARY
+                        1 -- count
 
-              (_, imageIndex) <- liftIO $ throwSwapchainOutOfDate $
-                Vk.acquireNextImageKHR
-                  (vkDevice ctx)
-                  (vkSwapchain swapchain)
-                  maxBound
-                  (fsSemaphoreImageAvailable fs)
-                  Vk.NULL_HANDLE
+                let cmdBuffer = Vector.head $ Resource.get cmdBuffers
+                Vk.beginCommandBuffer cmdBuffer
+                  $ Vk.CommandBufferBeginInfo
+                      ()
+                      Vk.zero
+                      Nothing -- Inheritance info
 
-              -- Only reset fences if we know we are submitting work, otherwise we
-              -- might deadlock later while waiting for the fence to signal.
-              liftIO $ Vk.resetFences
-                (vkDevice ctx)
-                (Vector.singleton $ fsFenceInFlight fs)
+                let
+                  frameData = Resource.get frameDatas !! fromIntegral imageIndex
 
-              cmdBuffers <-
-                withVkCommandBuffers
-                  (vkDevice ctx)
-                  $ Vk.CommandBufferAllocateInfo
-                      cmdPool
-                      -- Primary = can be submitted to queue for execution, can't be
-                      -- called by other command buffers.
-                      Vk.COMMAND_BUFFER_LEVEL_PRIMARY
-                      1 -- count
+                recordFrameData cmdBuffer swapchain frameData
 
-              let cmdBuffer = Vector.head $ Resource.get cmdBuffers
-              Vk.beginCommandBuffer cmdBuffer
-                $ Vk.CommandBufferBeginInfo
-                    ()
-                    Vk.zero
-                    Nothing -- Inheritance info
-
-              let
-                frameData = Resource.get frameDatas !! fromIntegral imageIndex
-
-              recordFrameData cmdBuffer swapchain frameData
-
-              Vk.endCommandBuffer cmdBuffer
-
-              let
-                submitInfo =
-                  Vk.SubmitInfo
-                    ()
-                    (Vector.singleton $ fsSemaphoreImageAvailable fs)
-                    (Vector.singleton Vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT)
-                    (Vector.singleton $ Vk.commandBufferHandle cmdBuffer)
-                    (Vector.singleton $ fsSemaphoreRenderFinished fs)
-              liftIO $ Vk.queueSubmit
-                (vkGraphicsQueue ctx)
-                (Vector.singleton $ Vk.SomeStruct submitInfo)
-                (fsFenceInFlight fs)
-
-              let
-                presentInfo = Vk.PresentInfoKHR
-                  ()
-                  (Vector.singleton $ fsSemaphoreRenderFinished fs)
-                  (Vector.singleton $ vkSwapchain swapchain)
-                  (Vector.singleton imageIndex)
-                  nullPtr
-              liftIO $ void
-                $ (throwSwapchainSubOptimal =<<)
-                $ throwSwapchainOutOfDate
-                $ Vk.queuePresentKHR (vkPresentationQueue ctx) presentInfo
+                Vk.endCommandBuffer cmdBuffer
+                pure cmdBuffer
 
             mEv <- liftIO $ getWindowEvent win
             shouldContinue <- liftIO $ case mEv of

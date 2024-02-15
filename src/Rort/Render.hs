@@ -1,8 +1,11 @@
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE DataKinds #-}
+
 module Rort.Render where
 
 import Control.Monad.Trans.Resource (MonadResource)
 import Rort.Vulkan.Context (VkContext)
-import Rort.Render.Swapchain (Swapchain, vkSurfaceFormat, vkImageViews, vkExtent)
+import Rort.Render.Swapchain (Swapchain, vkSurfaceFormat, vkImageViews, vkExtent, throwSwapchainOutOfDate, throwSwapchainSubOptimal)
 import Rort.Render.Types (RenderPassInfo, FrameData, DrawCall (PrimitiveDraw, IndexedDraw), Subpass (Subpass), DrawCallPrimitive(..), RenderPass(..), frameRenderPasses, FrameData(FrameData))
 import Rort.Util.Resource (Resource)
 import qualified Vulkan as Vk
@@ -16,9 +19,72 @@ import qualified Rort.Util.Resource as Resource
 import qualified Vulkan.CStruct.Extends as Vk
 import Data.Bits ((.|.))
 import Control.Monad (forM, forM_, unless)
-import Data.Functor ((<&>))
+import Data.Functor ((<&>), void)
 import Rort.Render.Types (SubpassInfo(..), Draw (..), DrawCallIndexed (..), BufferRef (..), RenderPassInfo (..))
-import Control.Monad.IO.Class (MonadIO)
+import Rort.Render.FramesInFlight (FrameSync (..))
+import Data.Word (Word32)
+import Control.Monad.IO.Class (MonadIO (..))
+import Foreign (nullPtr)
+
+finallyPresent
+  :: MonadIO m
+  => Vk.Device
+  -> Vk.Queue
+  -- ^ Graphics queue
+  -> Vk.Queue
+  -- ^ Present queue
+  -> Vk.SwapchainKHR
+  -> FrameSync
+  -> (("imageIndex" Vk.::: Word32) -> m Vk.CommandBuffer)
+  -> m ()
+finallyPresent device gfxQue presentQue swapchain fs f = do
+  void $ Vk.waitForFences
+    device
+    (Vector.singleton $ fsFenceInFlight fs)
+    True
+    maxBound
+
+  (_, imageIndex) <- liftIO $ throwSwapchainOutOfDate $
+    Vk.acquireNextImageKHR
+      device
+      swapchain
+      maxBound
+      (fsSemaphoreImageAvailable fs)
+      Vk.NULL_HANDLE
+
+  -- Only reset fences if we know we are submitting work, otherwise we
+  -- might deadlock later while waiting for the fence to signal.
+  liftIO $ Vk.resetFences
+    device
+    (Vector.singleton $ fsFenceInFlight fs)
+
+  cmdBuffer <- f imageIndex
+
+  -- TODO: Maybe don't submit command buffer on behalf of user?
+  let
+    submitInfo =
+      Vk.SubmitInfo
+        ()
+        (Vector.singleton $ fsSemaphoreImageAvailable fs)
+        (Vector.singleton Vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT)
+        (Vector.singleton $ Vk.commandBufferHandle cmdBuffer)
+        (Vector.singleton $ fsSemaphoreRenderFinished fs)
+  liftIO $ Vk.queueSubmit
+    gfxQue
+    (Vector.singleton $ Vk.SomeStruct submitInfo)
+    (fsFenceInFlight fs)
+
+  let
+    presentInfo = Vk.PresentInfoKHR
+      ()
+      (Vector.singleton $ fsSemaphoreRenderFinished fs)
+      (Vector.singleton swapchain)
+      (Vector.singleton imageIndex)
+      nullPtr
+  liftIO $ void
+    $ (throwSwapchainSubOptimal =<<)
+    $ throwSwapchainOutOfDate
+    $ Vk.queuePresentKHR presentQue presentInfo
 
 mkFrameData
   :: MonadResource m
