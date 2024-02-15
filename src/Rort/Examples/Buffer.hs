@@ -57,7 +57,7 @@ main = do
 
       let numFramesInFlight = 2
       framesInFlight <-
-        withFramesInFlight (vkDevice ctx) numFramesInFlight
+        withFramesInFlight (vkDevice ctx) (vkQueueFamilies ctx) numFramesInFlight
 
       framebufferSize <- liftIO $ vkGetFramebufferSize ctx
       initialSwapchain <-
@@ -88,7 +88,7 @@ main = do
               Nothing
           ]
 
-      cmdPool <-
+      copyCmdPool <-
         withVkCommandPool
           (vkDevice ctx)
           (NE.head . graphicsQueueFamilies $ vkQueueFamilies ctx)
@@ -161,7 +161,7 @@ main = do
 
       liftIO $ copyBuffer
         (vkDevice ctx)
-        (Resource.get cmdPool)
+        (Resource.get copyCmdPool)
         (vkGraphicsQueue ctx)
         (vertexBufferSize + indexBufferSize)
         (Resource.get stagingBuffer)
@@ -220,7 +220,7 @@ main = do
         let
           -- loop :: ResourceT IO ()
           loop = do
-            withNextFrameInFlight (vkDevice ctx) framesInFlight $ \(FrameInFlight fs _descPool) -> runResourceT $ do
+            withNextFrameInFlight (vkDevice ctx) framesInFlight $ \(FrameInFlight fs _descPool cmdPool) -> runResourceT $ do
               void $ Vk.waitForFences
                 (vkDevice ctx)
                 (Vector.singleton $ fsFenceInFlight fs)
@@ -245,7 +245,7 @@ main = do
                 withVkCommandBuffers
                   (vkDevice ctx)
                   $ Vk.CommandBufferAllocateInfo
-                      (Resource.get cmdPool)
+                      cmdPool
                       -- Primary = can be submitted to queue for execution, can't be
                       -- called by other command buffers.
                       Vk.COMMAND_BUFFER_LEVEL_PRIMARY

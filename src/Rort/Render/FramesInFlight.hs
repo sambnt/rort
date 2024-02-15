@@ -9,10 +9,12 @@ import Control.Monad.Trans.Resource (MonadResource)
 import Data.Word (Word32)
 import Control.Monad (replicateM_)
 import qualified Vulkan.Zero as Vk
-import Rort.Vulkan (withFence, withSemaphore, withVkDescriptorPool)
+import Rort.Vulkan (withFence, withSemaphore, withVkDescriptorPool, withVkCommandPool)
 import Rort.Util.Resource (Resource)
 import qualified Rort.Util.Resource as Resource
 import qualified Data.Vector as Vector
+import Rort.Vulkan.Context (QueueFamilies, graphicsQueueFamilies)
+import qualified Data.List.NonEmpty as NE
 
 data FrameSync
   = FrameSync { fsFenceInFlight           :: Vk.Fence
@@ -20,8 +22,9 @@ data FrameSync
               , fsSemaphoreRenderFinished :: Vk.Semaphore
               }
 
-data FrameInFlight = FrameInFlight { fifFrameSynce :: FrameSync
+data FrameInFlight = FrameInFlight { fifFrameSynce     :: FrameSync
                                    , fifDescriptorPool :: Vk.DescriptorPool
+                                   , fifCommandPool    :: Vk.CommandPool
                                    }
 
 data FramesInFlight
@@ -45,14 +48,17 @@ withNextFrameInFlight device s f =
              f fif
                `finally`
                  Vk.resetDescriptorPool device (fifDescriptorPool fif) Vk.zero
+               `finally`
+                 Vk.resetCommandPool device (fifCommandPool fif) Vk.zero
           )
 
 withFramesInFlight
   :: MonadResource m
   => Vk.Device
+  -> QueueFamilies
   -> NumFramesInFlight
   -> m FramesInFlight
-withFramesInFlight device numFramesInFlight = do
+withFramesInFlight device queueFamilies numFramesInFlight = do
   framesQue <- liftIO newTQueueIO
   replicateM_ (fromIntegral numFramesInFlight) $ do
     fs <- Resource.get <$> withFrameSync device
@@ -75,7 +81,14 @@ withFramesInFlight device numFramesInFlight = do
                 , Vk.DescriptorPoolSize Vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER maxImageSamplers
                 ]
             )
-    liftIO $ STM.atomically $ STM.writeTQueue framesQue (FrameInFlight fs descPool)
+    -- Allocate our command pool for this frame
+    cmdPool <-
+      Resource.get <$> withVkCommandPool
+        device
+        (NE.head . graphicsQueueFamilies $ queueFamilies)
+    liftIO
+      $ STM.atomically
+      $ STM.writeTQueue framesQue (FrameInFlight fs descPool cmdPool)
 
   pure $ FramesInFlight framesQue
 

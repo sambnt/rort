@@ -4,16 +4,15 @@
 module Rort.Examples.Triangle where
 
 import Rort.Window (withWindow, getRequiredExtensions, getWindowEvent, closeWindow)
-import Rort.Vulkan.Context (withVkContext, VkSettings (..), VkContext (..), graphicsQueueFamilies)
+import Rort.Vulkan.Context (withVkContext, VkSettings (..), VkContext (..))
 import Control.Monad.Trans.Resource (runResourceT)
 import qualified Data.Vector as Vector
 import qualified Vulkan as Vk
 import Control.Monad.IO.Class (liftIO)
 import qualified Data.ByteString as BS
-import qualified Data.List.NonEmpty as NE
 import Rort.Render.Swapchain (withSwapchain, vkSwapchain, throwSwapchainOutOfDate, throwSwapchainSubOptimal, retryOnSwapchainOutOfDate)
 import Rort.Render.FramesInFlight (withNextFrameInFlight, withFramesInFlight, fsSemaphoreRenderFinished, fsSemaphoreImageAvailable, fsFenceInFlight, FrameInFlight (FrameInFlight))
-import Rort.Vulkan (withVkShaderModule, withVkCommandBuffers, withVkCommandPool)
+import Rort.Vulkan (withVkShaderModule, withVkCommandBuffers)
 import qualified Vulkan.Zero as Vk
 import qualified Rort.Util.Resource as Resource
 import qualified Vulkan.CStruct.Extends as Vk
@@ -55,7 +54,7 @@ main = do
 
       let numFramesInFlight = 2
       framesInFlight <-
-        withFramesInFlight (vkDevice ctx) numFramesInFlight
+        withFramesInFlight (vkDevice ctx) (vkQueueFamilies ctx) numFramesInFlight
 
       framebufferSize <- liftIO $ vkGetFramebufferSize ctx
       initialSwapchain <-
@@ -85,11 +84,6 @@ main = do
               "main"
               Nothing
           ]
-
-      cmdPool <-
-        withVkCommandPool
-          (vkDevice ctx)
-          (NE.head . graphicsQueueFamilies $ vkQueueFamilies ctx)
 
       retryOnSwapchainOutOfDate ctx initialSwapchain $ \swapchain -> do
         -- BEGIN swapchain-dependent
@@ -121,7 +115,7 @@ main = do
         -- rendering a frame
         let
           loop = do
-            withNextFrameInFlight (vkDevice ctx) framesInFlight $ \(FrameInFlight fs _descPool) -> runResourceT $ do
+            withNextFrameInFlight (vkDevice ctx) framesInFlight $ \(FrameInFlight fs _descPool cmdPool) -> runResourceT $ do
               void $ Vk.waitForFences
                 (vkDevice ctx)
                 (Vector.singleton $ fsFenceInFlight fs)
@@ -146,7 +140,7 @@ main = do
                 withVkCommandBuffers
                   (vkDevice ctx)
                   $ Vk.CommandBufferAllocateInfo
-                      (Resource.get cmdPool)
+                      cmdPool
                       -- Primary = can be submitted to queue for execution, can't be
                       -- called by other command buffers.
                       Vk.COMMAND_BUFFER_LEVEL_PRIMARY
