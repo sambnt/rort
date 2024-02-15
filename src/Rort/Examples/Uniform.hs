@@ -12,14 +12,15 @@ import Control.Monad.IO.Class (liftIO)
 import qualified Vulkan.Core10.FundamentalTypes as Extent2D (Extent2D(width, height))
 import qualified Data.ByteString as BS
 import qualified Data.List.NonEmpty as NE
-import Rort.Render.Swapchain (withSwapchain, fsFenceInFlight, withNextFrameInFlight, fsSemaphoreImageAvailable, vkSwapchain, throwSwapchainOutOfDate, fsSemaphoreRenderFinished, throwSwapchainSubOptimal, retryOnSwapchainOutOfDate, Swapchain (vkExtent))
-import Rort.Vulkan (withVkShaderModule, withVkPipelineLayout, withVkCommandBuffers, withVkCommandPool, withVkBuffer, withVkBufferMemory, copyBuffer, withVkDescriptorSetLayout, withVkDescriptorPool, withVkDescriptorSet)
+import Rort.Render.Swapchain (withSwapchain, vkSwapchain, throwSwapchainOutOfDate, throwSwapchainSubOptimal, retryOnSwapchainOutOfDate, Swapchain (vkExtent))
+import Rort.Render.FramesInFlight (withNextFrameInFlight, withFramesInFlight, fsSemaphoreImageAvailable, fsSemaphoreRenderFinished, fsFenceInFlight)
+import Rort.Vulkan (withVkShaderModule, withVkCommandBuffers, withVkCommandPool, withVkBuffer, withVkBufferMemory, copyBuffer, withVkDescriptorSetLayout, withVkDescriptorPool)
 import qualified Vulkan.Zero as Vk
 import qualified Rort.Util.Resource as Resource
 import qualified Vulkan.CStruct.Extends as Vk
 import Data.Bits ((.|.))
 import Rort.Render.Types (SubpassInfo(..), RenderPassInfo(..), Draw(..), DrawCallIndexed(..), BufferRef (..), DrawCall (..), DrawCallPrimitive (..), Subpass (Subpass), RenderPass (renderPassSubpasses, renderPass), frameRenderPasses)
-import Rort.Render (mkFrameData, recordFrameData)
+import Rort.Render (mkFrameData)
 import Control.Monad (when, unless, forM_)
 import Data.Functor (void, (<&>))
 import Foreign (nullPtr, sizeOf, Word16, castPtr, pokeArray, advancePtr)
@@ -68,9 +69,12 @@ main = do
       fragShaderCode <- liftIO $ BS.readFile "data/tri.frag.spv"
 
       let numFramesInFlight = 2
+      framesInFlight <-
+        withFramesInFlight (vkDevice ctx) numFramesInFlight
+
       framebufferSize <- liftIO $ vkGetFramebufferSize ctx
       initialSwapchain <-
-        withSwapchain ctx numFramesInFlight framebufferSize Nothing
+        withSwapchain ctx framebufferSize Nothing
 
       vertShader <-
         withVkShaderModule (vkDevice ctx)
@@ -266,7 +270,7 @@ main = do
         let
           -- loop :: ResourceT IO ()
           loop = do
-            withNextFrameInFlight swapchain $ \fs -> runResourceT $ do
+            withNextFrameInFlight framesInFlight $ \fs -> runResourceT $ do
               void $ Vk.waitForFences
                 (vkDevice ctx)
                 (Vector.singleton $ fsFenceInFlight fs)

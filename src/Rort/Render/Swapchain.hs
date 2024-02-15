@@ -8,12 +8,10 @@ import qualified Vulkan.Exception as Vk
 import Control.Monad.Trans.Resource (MonadResource, runResourceT, MonadUnliftIO)
 import qualified Control.Monad.Trans.Resource as ResourceT
 import qualified Vulkan.Zero as Vk
-import Control.Concurrent.STM (TQueue, newTQueueIO)
-import qualified Control.Concurrent.STM as STM
 import Rort.Vulkan.Context (VkContext, vkDevice, swapchainSupportCapabilities, swapchainSupportPresentModes, querySwapchainSupport, swapchainSupportFormats, vkSurface, vkPhysicalDevice, graphicsQueueFamilies, presentationQueueFamilies, vkQueueFamilies, vkGetFramebufferSize)
 import Data.Word (Word32)
-import Control.Monad.IO.Class (liftIO)
-import Control.Monad (replicateM, forM_)
+import Control.Monad.IO.Class ( liftIO, MonadIO )
+import Control.Monad ( forM_, forM )
 import Data.Vector (Vector)
 import qualified Vulkan.Extensions.VK_KHR_get_surface_capabilities2 as VkE ( SurfaceCapabilitiesKHR(currentTransform, currentExtent, minImageExtent, maxImageExtent, maxImageCount, minImageCount), format, colorSpace )
 import qualified Data.Vector as Vector
@@ -22,19 +20,11 @@ import qualified Vulkan.Core10.DeviceInitialization as VkDev
 import qualified Vulkan.Extensions.VK_KHR_display_swapchain as VkSwapchain
 import qualified Vulkan.Core10.FundamentalTypes as Extent2D (Extent2D(width, height))
 import Data.List.NonEmpty (NonEmpty)
-import Control.Monad (forM)
-import Control.Monad.IO.Class (MonadIO)
 import Data.Bits ((.&.))
 import Rort.Util.Resource (Resource)
 import qualified Rort.Util.Resource as Resource
-import Control.Monad.Catch (bracket, MonadMask, Exception, handleIf, MonadCatch)
+import Control.Monad.Catch (Exception, handleIf, MonadCatch)
 import Control.Exception (throwIO, try, SomeException, fromException)
-
-data FrameSync
-  = FrameSync { fsFenceInFlight           :: Vk.Fence
-              , fsSemaphoreImageAvailable :: Vk.Semaphore
-              , fsSemaphoreRenderFinished :: Vk.Semaphore
-              }
 
 data Swapchain
   = Swapchain { vkSwapchain                :: Vk.SwapchainKHR
@@ -42,20 +32,7 @@ data Swapchain
               , vkSurfaceFormat            :: Vk.SurfaceFormatKHR
               , vkDepthFormat              :: Vk.Format
               , vkExtent                   :: Vk.Extent2D
-              , swapchainFrames            :: TQueue FrameSync
-              , swapchainNumFramesInFlight :: Word32
               }
-
-withNextFrameInFlight
-  :: ( MonadMask m
-     , MonadIO m
-     )
-  => Swapchain
-  -> (FrameSync -> m r)
-  -> m r
-withNextFrameInFlight s =
-  bracket (liftIO . STM.atomically . STM.readTQueue $ swapchainFrames s)
-          (liftIO . STM.atomically . STM.writeTQueue (swapchainFrames s))
 
 data SwapchainOutOfDate = SwapchainOutOfDate
   deriving (Eq, Show)
@@ -96,7 +73,6 @@ retryOnSwapchainOutOfDate ctx initialSwapchain f = do
         swapchain <-
           withSwapchain
             ctx
-            (swapchainNumFramesInFlight $ Resource.get initialSwapchain)
             framebufferSize
             (Just $ Resource.get initialSwapchain)
         liftIO $ Resource.free initialSwapchain
@@ -108,22 +84,10 @@ retryOnSwapchainOutOfDate ctx initialSwapchain f = do
 withSwapchain
   :: MonadResource m
   => VkContext
-  -> Word32 -- ^ Num frames in flight
   -> (Int, Int) -- ^ Frame buffer size
   -> Maybe Swapchain -- ^ Old swapchain
   -> m (Resource Swapchain)
-withSwapchain ctx numFramesInFlight framebufferSize mOldSwapchain = do
-  framesQue <- case mOldSwapchain of
-    Nothing -> do
-      framesQue <- liftIO newTQueueIO
-      frameInFlightData <-
-        replicateM (fromIntegral numFramesInFlight) $
-          withFrameSync (vkDevice ctx)
-      liftIO $ STM.atomically $ forM_ frameInFlightData (STM.writeTQueue framesQue)
-      pure framesQue
-    Just oldSwapchain -> do
-      pure $ swapchainFrames oldSwapchain
-
+withSwapchain ctx framebufferSize mOldSwapchain = do
   sci <- liftIO $ mkSwapchainCreateInfo
            (vkPhysicalDevice ctx)
            (vkSurface ctx)
@@ -149,8 +113,6 @@ withSwapchain ctx numFramesInFlight framebufferSize mOldSwapchain = do
                    <*> pure (Vk.SurfaceFormatKHR format colorSpace)
                    <*> pure depthFormat
                    <*> pure (VkSwapchain.imageExtent sci)
-                   <*> pure framesQue
-                   <*> pure numFramesInFlight
 
 mkSwapchainCreateInfo
   :: MonadIO m
@@ -212,45 +174,6 @@ mkSwapchainCreateInfo physicalDevice surface frameBufferSize graphicsQueueIx pre
       presentMode
       True -- Clip pixels obscured by another window
       oldSwapchain
-
-withFrameSync
-  :: MonadResource m
-  => Vk.Device
-  -> m FrameSync
-withFrameSync logicalDevice = do
-  let
-    -- Create the fence pre-signalled so the first time we wait on the fence in
-    -- drawing, we don't wait forever.
-    fenceInfo = Vk.FenceCreateInfo () Vk.FENCE_CREATE_SIGNALED_BIT
-    semaphoreInfo = Vk.SemaphoreCreateInfo () Vk.zero
-  inFlightFence <- withFence logicalDevice fenceInfo
-  renderFinishedSem <- withSemaphore logicalDevice semaphoreInfo
-  imageAvailableSem <- withSemaphore logicalDevice semaphoreInfo
-  pure $
-    FrameSync
-      inFlightFence
-      imageAvailableSem
-      renderFinishedSem
-
-withFence
-  :: MonadResource m
-  => Vk.Device
-  -> Vk.FenceCreateInfo '[]
-  -> m Vk.Fence
-withFence logicalDevice fenceInfo =
-    snd <$> ResourceT.allocate
-      (Vk.createFence logicalDevice fenceInfo Nothing)
-      (\fence -> Vk.destroyFence logicalDevice fence Nothing)
-
-withSemaphore
-  :: MonadResource m
-  => Vk.Device
-  -> Vk.SemaphoreCreateInfo '[]
-  -> m Vk.Semaphore
-withSemaphore logicalDevice semaphoreInfo =
-    snd <$> ResourceT.allocate
-      (Vk.createSemaphore logicalDevice semaphoreInfo Nothing)
-      (\sem -> Vk.destroySemaphore logicalDevice sem Nothing)
 
 createSwapchainImageView
   :: MonadIO m

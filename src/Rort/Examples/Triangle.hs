@@ -11,8 +11,9 @@ import qualified Vulkan as Vk
 import Control.Monad.IO.Class (liftIO)
 import qualified Data.ByteString as BS
 import qualified Data.List.NonEmpty as NE
-import Rort.Render.Swapchain (withSwapchain, fsFenceInFlight, withNextFrameInFlight, fsSemaphoreImageAvailable, vkSwapchain, throwSwapchainOutOfDate, fsSemaphoreRenderFinished, throwSwapchainSubOptimal, retryOnSwapchainOutOfDate)
-import Rort.Vulkan (withVkShaderModule, withVkPipelineLayout, withVkCommandBuffers, withVkCommandPool)
+import Rort.Render.Swapchain (withSwapchain, vkSwapchain, throwSwapchainOutOfDate, throwSwapchainSubOptimal, retryOnSwapchainOutOfDate)
+import Rort.Render.FramesInFlight (withNextFrameInFlight, withFramesInFlight, fsSemaphoreRenderFinished, fsSemaphoreImageAvailable, fsFenceInFlight)
+import Rort.Vulkan (withVkShaderModule, withVkCommandBuffers, withVkCommandPool)
 import qualified Vulkan.Zero as Vk
 import qualified Rort.Util.Resource as Resource
 import qualified Vulkan.CStruct.Extends as Vk
@@ -53,9 +54,12 @@ main = do
       fragShaderCode <- liftIO $ BS.readFile "data/tri.frag.spv"
 
       let numFramesInFlight = 2
+      framesInFlight <-
+        withFramesInFlight (vkDevice ctx) numFramesInFlight
+
       framebufferSize <- liftIO $ vkGetFramebufferSize ctx
       initialSwapchain <-
-        withSwapchain ctx numFramesInFlight framebufferSize Nothing
+        withSwapchain ctx framebufferSize Nothing
 
       vertShader <-
         withVkShaderModule (vkDevice ctx)
@@ -117,7 +121,7 @@ main = do
         -- rendering a frame
         let
           loop = do
-            withNextFrameInFlight swapchain $ \fs -> runResourceT $ do
+            withNextFrameInFlight framesInFlight $ \fs -> runResourceT $ do
               void $ Vk.waitForFences
                 (vkDevice ctx)
                 (Vector.singleton $ fsFenceInFlight fs)
