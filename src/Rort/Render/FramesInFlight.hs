@@ -4,14 +4,15 @@ import Control.Concurrent.STM (TQueue, newTQueueIO)
 import qualified Control.Concurrent.STM as STM
 import qualified Vulkan as Vk
 import Control.Monad.IO.Class (MonadIO, liftIO)
-import Control.Monad.Catch (MonadMask, bracket)
+import Control.Monad.Catch (MonadMask, bracket, finally)
 import Control.Monad.Trans.Resource (MonadResource)
 import Data.Word (Word32)
 import Control.Monad (replicateM_)
 import qualified Vulkan.Zero as Vk
-import Rort.Vulkan (withFence, withSemaphore)
+import Rort.Vulkan (withFence, withSemaphore, withVkDescriptorPool)
 import Rort.Util.Resource (Resource)
 import qualified Rort.Util.Resource as Resource
+import qualified Data.Vector as Vector
 
 data FrameSync
   = FrameSync { fsFenceInFlight           :: Vk.Fence
@@ -19,8 +20,12 @@ data FrameSync
               , fsSemaphoreRenderFinished :: Vk.Semaphore
               }
 
+data FrameInFlight = FrameInFlight { fifFrameSynce :: FrameSync
+                                   , fifDescriptorPool :: Vk.DescriptorPool
+                                   }
+
 data FramesInFlight
-  = FramesInFlight { framesInFlightFrameSync :: TQueue FrameSync
+  = FramesInFlight { framesInFlightFrameSync :: TQueue FrameInFlight
                    }
 
 type NumFramesInFlight = Word32
@@ -29,12 +34,18 @@ withNextFrameInFlight
   :: ( MonadMask m
      , MonadIO m
      )
-  => FramesInFlight
-  -> (FrameSync -> m r)
+  => Vk.Device
+  -> FramesInFlight
+  -> (FrameInFlight -> m r)
   -> m r
-withNextFrameInFlight s =
+withNextFrameInFlight device s f =
   bracket (liftIO . STM.atomically . STM.readTQueue $ framesInFlightFrameSync s)
           (liftIO . STM.atomically . STM.writeTQueue (framesInFlightFrameSync s))
+          (\fif ->
+             f fif
+               `finally`
+                 Vk.resetDescriptorPool device (fifDescriptorPool fif) Vk.zero
+          )
 
 withFramesInFlight
   :: MonadResource m
@@ -45,7 +56,26 @@ withFramesInFlight device numFramesInFlight = do
   framesQue <- liftIO newTQueueIO
   replicateM_ (fromIntegral numFramesInFlight) $ do
     fs <- Resource.get <$> withFrameSync device
-    liftIO $ STM.atomically $ STM.writeTQueue framesQue fs
+    -- TODO: We just hard-code some large sizes for the pool. In the future we
+    -- might analyse the render graph to allocate the right number of descriptor
+    -- sets, OR we could use a free list of descriptor pools.
+    let
+      maxSets = 1024
+      maxUniformBuffers = 8192
+      maxImageSamplers = 8192
+    descPool <-
+      fmap Resource.get $ withVkDescriptorPool
+        device
+        $ Vk.DescriptorPoolCreateInfo
+            ()
+            Vk.zero
+            maxSets -- max sets we can allocate from this pool
+            ( Vector.fromList
+                [ Vk.DescriptorPoolSize Vk.DESCRIPTOR_TYPE_UNIFORM_BUFFER maxUniformBuffers
+                , Vk.DescriptorPoolSize Vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER maxImageSamplers
+                ]
+            )
+    liftIO $ STM.atomically $ STM.writeTQueue framesQue (FrameInFlight fs descPool)
 
   pure $ FramesInFlight framesQue
 

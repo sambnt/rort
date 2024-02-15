@@ -13,8 +13,8 @@ import qualified Vulkan.Core10.FundamentalTypes as Extent2D (Extent2D(width, hei
 import qualified Data.ByteString as BS
 import qualified Data.List.NonEmpty as NE
 import Rort.Render.Swapchain (withSwapchain, vkSwapchain, throwSwapchainOutOfDate, throwSwapchainSubOptimal, retryOnSwapchainOutOfDate, Swapchain (vkExtent))
-import Rort.Render.FramesInFlight (withNextFrameInFlight, withFramesInFlight, fsSemaphoreImageAvailable, fsSemaphoreRenderFinished, fsFenceInFlight)
-import Rort.Vulkan (withVkShaderModule, withVkCommandBuffers, withVkCommandPool, withVkBuffer, withVkBufferMemory, copyBuffer, withVkDescriptorSetLayout, withVkDescriptorPool)
+import Rort.Render.FramesInFlight (withNextFrameInFlight, withFramesInFlight, fsSemaphoreImageAvailable, fsSemaphoreRenderFinished, fsFenceInFlight, FrameInFlight (FrameInFlight))
+import Rort.Vulkan (withVkShaderModule, withVkCommandBuffers, withVkCommandPool, withVkBuffer, withVkBufferMemory, copyBuffer, withVkDescriptorSetLayout)
 import qualified Vulkan.Zero as Vk
 import qualified Rort.Util.Resource as Resource
 import qualified Vulkan.CStruct.Extends as Vk
@@ -118,28 +118,6 @@ main = do
         withVkCommandPool
           (vkDevice ctx)
           (NE.head . graphicsQueueFamilies $ vkQueueFamilies ctx)
-
-      descriptorPool <-
-        withVkDescriptorPool
-          (vkDevice ctx)
-          $ Vk.DescriptorPoolCreateInfo
-              ()
-              Vk.zero
-              1 -- max sets we can allocate from this pool
-              ( Vector.fromList
-                  [ Vk.DescriptorPoolSize Vk.DESCRIPTOR_TYPE_UNIFORM_BUFFER 1
-                  ]
-              )
-
-      set <-
-        -- Not recommended to free descriptor sets, just free pool. So we don't
-        -- setup a destructor here.
-        fmap Vector.head $ Vk.allocateDescriptorSets
-          (vkDevice ctx)
-          $ Vk.DescriptorSetAllocateInfo
-              ()
-              (Resource.get descriptorPool)
-              (Vector.singleton $ Resource.get setLayout)
 
       let
         vertices :: [Float]
@@ -271,7 +249,7 @@ main = do
         let
           -- loop :: ResourceT IO ()
           loop = do
-            withNextFrameInFlight framesInFlight $ \fs -> runResourceT $ do
+            withNextFrameInFlight (vkDevice ctx) framesInFlight $ \(FrameInFlight fs descPool) -> runResourceT $ do
               void $ Vk.waitForFences
                 (vkDevice ctx)
                 (Vector.singleton $ fsFenceInFlight fs)
@@ -291,6 +269,16 @@ main = do
               liftIO $ Vk.resetFences
                 (vkDevice ctx)
                 (Vector.singleton $ fsFenceInFlight fs)
+
+              set <-
+                -- Not recommended to free descriptor sets, just reset pool. So
+                -- we don't setup a destructor here.
+                fmap Vector.head $ Vk.allocateDescriptorSets
+                  (vkDevice ctx)
+                  $ Vk.DescriptorSetAllocateInfo
+                      ()
+                      descPool
+                      (Vector.singleton $ Resource.get setLayout)
 
               let
                 uniformBufferSize =

@@ -12,7 +12,7 @@ import Control.Monad.IO.Class (liftIO)
 import qualified Data.ByteString as BS
 import qualified Data.List.NonEmpty as NE
 import Rort.Render.Swapchain (withSwapchain, vkSwapchain, throwSwapchainOutOfDate, throwSwapchainSubOptimal, retryOnSwapchainOutOfDate)
-import Rort.Render.FramesInFlight (withNextFrameInFlight, withFramesInFlight, fsSemaphoreRenderFinished, fsSemaphoreImageAvailable, fsFenceInFlight)
+import Rort.Render.FramesInFlight (withNextFrameInFlight, withFramesInFlight, fsSemaphoreRenderFinished, fsSemaphoreImageAvailable, fsFenceInFlight, FrameInFlight (FrameInFlight))
 import Rort.Vulkan (withVkShaderModule, withVkCommandBuffers, withVkCommandPool)
 import qualified Vulkan.Zero as Vk
 import qualified Rort.Util.Resource as Resource
@@ -121,7 +121,7 @@ main = do
         -- rendering a frame
         let
           loop = do
-            withNextFrameInFlight framesInFlight $ \fs -> runResourceT $ do
+            withNextFrameInFlight (vkDevice ctx) framesInFlight $ \(FrameInFlight fs _descPool) -> runResourceT $ do
               void $ Vk.waitForFences
                 (vkDevice ctx)
                 (Vector.singleton $ fsFenceInFlight fs)
