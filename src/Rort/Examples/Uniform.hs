@@ -59,12 +59,6 @@ main = do
 
       ctx <- withVkContext cfg win
 
-      allocator <- Allocator.withAllocator
-        (vkPhysicalDevice ctx)
-        (vkDevice ctx)
-        (vkInstance ctx)
-        cfg.applicationInfo.apiVersion
-
       vertShaderCode <- liftIO $ BS.readFile "data/uniformBuffer.vert.spv"
       fragShaderCode <- liftIO $ BS.readFile "data/tri.frag.spv"
 
@@ -285,7 +279,7 @@ main = do
                   fromIntegral $ 3 * sizeOf(undefined :: M44 Float)
               (uniformBuffer, uniformBufferPtr) <- Resource.get
                 <$> Allocator.withUniformBuffer
-                      (Resource.get allocator)
+                      (vkAllocator ctx)
                       uniformBufferSize
 
               Vk.updateDescriptorSets (vkDevice ctx)
