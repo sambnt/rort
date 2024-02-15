@@ -64,7 +64,7 @@ retryOnSwapchainOutOfDate
   :: (MonadCatch m, MonadResource m, MonadUnliftIO m)
   => VkContext
   -> Resource Swapchain
-  -> (Swapchain -> ResourceT.ResourceT m a)
+  -> (Swapchain -> m a)
   -> m a
 retryOnSwapchainOutOfDate ctx initialSwapchain f = do
   handleIf isSwapchainOutOfDate
@@ -79,7 +79,7 @@ retryOnSwapchainOutOfDate ctx initialSwapchain f = do
         -- Retry the computation
         retryOnSwapchainOutOfDate ctx swapchain f
     )
-    (runResourceT $ f $ Resource.get initialSwapchain)
+    (f $ Resource.get initialSwapchain)
 
 withSwapchain
   :: MonadResource m
