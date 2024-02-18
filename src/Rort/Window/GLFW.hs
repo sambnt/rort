@@ -10,7 +10,7 @@ import qualified Graphics.UI.GLFW as GLFW
 import qualified Control.Monad.Trans.Resource as ResourceT
 import qualified Data.Vector as Vector
 import qualified Vulkan as Vk
-import Control.Monad.Catch (bracket)
+import Control.Exception.Safe (bracket)
 import Control.Monad (when)
 import Control.Concurrent.STM (TQueue)
 import qualified Control.Concurrent.STM as STM

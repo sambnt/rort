@@ -22,8 +22,7 @@ import Data.List.NonEmpty (NonEmpty)
 import Data.Bits ((.&.))
 import Rort.Util.Resource (Resource)
 import qualified Rort.Util.Resource as Resource
-import Control.Monad.Catch (Exception, handleIf, MonadCatch)
-import Control.Exception (throwIO, try, SomeException, fromException)
+import Control.Exception.Safe (Exception, MonadCatch, handleJust, SomeException, throwIO, try, fromException)
 
 data Swapchain
   = Swapchain { vkSwapchain                :: Vk.SwapchainKHR
@@ -79,6 +78,9 @@ retryOnSwapchainOutOfDate ctx initialSwapchain f = do
         retryOnSwapchainOutOfDate ctx swapchain f
     )
     (f $ Resource.get initialSwapchain)
+
+  where
+    handleIf fb = handleJust (\e -> if fb e then Just e else Nothing)
 
 withSwapchain
   :: MonadResource m
