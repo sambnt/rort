@@ -17,6 +17,7 @@ common project-config
                         -Wpartial-fields
                         -Wredundant-constraints
                         -Wunused-packages
+                        -threaded
 
 library
   import:           project-config
@@ -50,6 +51,7 @@ library
                   , bitmap
                   , stb-image
                   , stm
+                  , unliftio
                   , vector
                   , VulkanMemoryAllocator
                   , bytestring
@@ -96,7 +98,9 @@ executable rort
                     -- , sdl2
                     , topograph
                     , linear
+                    , VulkanMemoryAllocator
                     , OpenGL
+                    , unliftio
                     , bitmap
                     , stb-image
                     , stm

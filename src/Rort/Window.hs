@@ -5,6 +5,7 @@ module Rort.Window ( Window
                    , getRequiredExtensions
                    , getFramebufferSize
                    , getWindowEvent
+                   , withWindowEvent
                    , closeWindow
                    ) where
 
@@ -46,3 +47,6 @@ closeWindow (GLFW w) = RortGLFW.closeWindow w
 
 getWindowEvent :: Window -> IO (Maybe WindowEvent)
 getWindowEvent (GLFW w) = RortGLFW.getWindowEvent w
+
+withWindowEvent :: Window -> (Maybe WindowEvent -> IO r) -> IO r
+withWindowEvent (GLFW w) = RortGLFW.withWindowEvent w

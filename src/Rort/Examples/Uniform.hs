@@ -399,22 +399,22 @@ main = do
 
             renderLoop
 
-          -- loop :: ResourceT IO ()
+          eventLoop :: ResourceT IO ()
           eventLoop = do
-            mEv <- liftIO $ getWindowEvent win
-            shouldContinue <- liftIO $ case mEv of
-              Just (WindowError err) -> do
-                putStrLn $ "Error " <> show err
-                closeWindow win
-                pure False
-              Just WindowClose -> do
-                putStrLn "Window closing..."
-                closeWindow win
-                pure False
-              Just (WindowResize x y) -> do
-                putStrLn $ "Window resizing (" <> show x <> ", " <> show y <> ")"
-                pure True
-              Nothing -> pure True
+            shouldContinue <- liftIO $ withWindowEvent win $ \mEv -> do
+              case mEv of
+                Just (WindowError err) -> do
+                  -- putStrLn $ "Error " <> show err
+                  closeWindow win
+                  pure False
+                Just WindowClose -> do
+                  -- putStrLn "Window closing..."
+                  closeWindow win
+                  pure False
+                Just (WindowResize x y) -> do
+                  -- putStrLn $ "Window resizing (" <> show x <> ", " <> show y <> ")"
+                  pure True
+                Nothing -> pure True
             when shouldContinue eventLoop
 
         race_ eventLoop renderLoop

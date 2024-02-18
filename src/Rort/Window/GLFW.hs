@@ -23,6 +23,7 @@ import Foreign.C (peekCString)
 import Foreign.Ptr (nullPtr)
 import Control.Monad.Trans.Resource (MonadResource)
 import Data.Bifunctor (bimap)
+import Control.Exception (onException)
 
 data WindowGLFW = WindowGLFW GLFW.Window (TQueue WindowEvent)
 
@@ -88,6 +89,17 @@ getWindowEvent :: WindowGLFW -> IO (Maybe WindowEvent)
 getWindowEvent (WindowGLFW _win que) = do
   GLFW.pollEvents
   STM.atomically $ STM.tryReadTQueue que
+
+withWindowEvent :: WindowGLFW -> (Maybe WindowEvent -> IO r) -> IO r
+withWindowEvent (WindowGLFW _win que) f = do
+  GLFW.pollEvents
+  mask $ \restore -> do
+    mEv <- STM.atomically $ STM.tryReadTQueue que
+    restore (f mEv)
+      `onException` case mEv of
+                        Nothing -> pure ()
+                        Just ev -> STM.atomically $ STM.writeTQueue que ev
+
 
 getRequiredExtensions :: WindowGLFW -> IO (Vector BSC.ByteString)
 getRequiredExtensions (WindowGLFW _ _) = do
