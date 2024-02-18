@@ -65,19 +65,24 @@ retryOnSwapchainOutOfDate
   -> (Swapchain -> m a)
   -> m a
 retryOnSwapchainOutOfDate ctx initialSwapchain f = do
-  handleIf isSwapchainOutOfDate
-    (\_ -> do
-        framebufferSize <- liftIO $ vkGetFramebufferSize ctx
-        swapchain <-
-          withSwapchain
-            ctx
-            framebufferSize
-            (Just $ Resource.get initialSwapchain)
-        liftIO $ Resource.free initialSwapchain
-        -- Retry the computation
-        retryOnSwapchainOutOfDate ctx swapchain f
-    )
-    (f $ Resource.get initialSwapchain)
+  eResult <- try $ f $ Resource.get initialSwapchain
+  case eResult of
+    Left SwapchainOutOfDate -> do
+      framebufferSize <- liftIO $ vkGetFramebufferSize ctx
+      swapchain <-
+        withSwapchain
+          ctx
+          framebufferSize
+          (Just $ Resource.get initialSwapchain)
+      liftIO $ Resource.free initialSwapchain
+      -- Retry the computation
+      retryOnSwapchainOutOfDate ctx swapchain f
+    Right result ->
+      pure result
+    -- NOTE: Unmatched exceptions will be thrown.
+  -- NOTE: Previously we used handleJust and looped in the handler. This had
+  -- undesirable consequences. It seemed to swallow asynchronous exceptions.
+  -- I'm not sure why, but I don't recommend looping in an exception handler.
 
   where
     handleIf fb = handleJust (\e -> if fb e then Just e else Nothing)
