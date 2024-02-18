@@ -22,7 +22,7 @@ import Data.List.NonEmpty (NonEmpty)
 import Data.Bits ((.&.))
 import Rort.Util.Resource (Resource)
 import qualified Rort.Util.Resource as Resource
-import Control.Exception.Safe (Exception, MonadCatch, handleJust, SomeException, throwIO, try, fromException)
+import Control.Exception.Safe (Exception, MonadCatch, SomeException, throwIO, try, fromException)
 
 data Swapchain
   = Swapchain { vkSwapchain                :: Vk.SwapchainKHR
@@ -83,9 +83,6 @@ retryOnSwapchainOutOfDate ctx initialSwapchain f = do
   -- NOTE: Previously we used handleJust and looped in the handler. This had
   -- undesirable consequences. It seemed to swallow asynchronous exceptions.
   -- I'm not sure why, but I don't recommend looping in an exception handler.
-
-  where
-    handleIf fb = handleJust (\e -> if fb e then Just e else Nothing)
 
 withSwapchain
   :: MonadResource m

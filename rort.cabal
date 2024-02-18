@@ -132,7 +132,6 @@ test-suite test
     , text
     , rort
     , mtl
-    , exceptions
     , bytestring
     , resourcet
     , mmorph

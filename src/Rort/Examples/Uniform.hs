@@ -3,9 +3,9 @@
 
 module Rort.Examples.Uniform where
 
-import Rort.Window (withWindow, getRequiredExtensions, getWindowEvent, closeWindow)
+import Rort.Window (withWindow, getRequiredExtensions, closeWindow, withWindowEvent)
 import Rort.Vulkan.Context (withVkContext, VkSettings (..), VkContext (..), graphicsQueueFamilies)
-import Control.Monad.Trans.Resource (runResourceT)
+import Control.Monad.Trans.Resource (runResourceT, ResourceT)
 import qualified Data.Vector as Vector
 import qualified Vulkan as Vk
 import Control.Monad.IO.Class (liftIO)
@@ -32,7 +32,7 @@ import Data.Function ((&))
 import qualified Rort.Allocator as Allocator
 import qualified Chronos
 import Control.Lens ((%~))
-import UnliftIO.Async (race_)
+import UnliftIO.Async (race_, concurrently_)
 
 main :: IO ()
 main = do
@@ -404,20 +404,20 @@ main = do
             shouldContinue <- liftIO $ withWindowEvent win $ \mEv -> do
               case mEv of
                 Just (WindowError err) -> do
-                  -- putStrLn $ "Error " <> show err
+                  putStrLn $ "Error " <> show err
                   closeWindow win
                   pure False
                 Just WindowClose -> do
-                  -- putStrLn "Window closing..."
+                  putStrLn "Window closing..."
                   closeWindow win
                   pure False
                 Just (WindowResize x y) -> do
-                  -- putStrLn $ "Window resizing (" <> show x <> ", " <> show y <> ")"
+                  putStrLn $ "Window resizing (" <> show x <> ", " <> show y <> ")"
                   pure True
                 Nothing -> pure True
             when shouldContinue eventLoop
 
-        race_ eventLoop renderLoop
+        race_ eventLoop (concurrently_ renderLoop renderLoop)
 
 getUniformBufferData
   :: Chronos.Time -> Chronos.Time -> (Int, Int) -> [M44 Float]
