@@ -105,7 +105,7 @@ main = do
 
         let
           loop = do
-            step ctx renderer $ \frameData swapchain _descPool _cmdPool -> do
+            step ctx renderer $ \frameData swapchain _descPool cmdPool -> do
                 (_, cmdBuffers) <-
                   allocateAcquire $ withVkCommandBuffers
                     (vkDevice ctx)
