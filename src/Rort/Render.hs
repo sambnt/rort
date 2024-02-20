@@ -3,28 +3,24 @@
 
 module Rort.Render where
 
-import Control.Monad.Trans.Resource (MonadResource)
-import Rort.Vulkan.Context (VkContext)
+import Rort.Vulkan.Context ( VkContext(..) )
 import Rort.Render.Swapchain (Swapchain, vkSurfaceFormat, vkImageViews, vkExtent, throwSwapchainOutOfDate, throwSwapchainSubOptimal)
-import Rort.Render.Types (RenderPassInfo, FrameData, DrawCall (PrimitiveDraw, IndexedDraw), Subpass (Subpass), DrawCallPrimitive(..), RenderPass(..), frameRenderPasses, FrameData(FrameData))
-import Rort.Util.Resource (Resource)
+import Rort.Render.Types ( RenderPassInfo, FrameData, DrawCall(PrimitiveDraw, IndexedDraw), Subpass(Subpass), DrawCallPrimitive(..), RenderPass(..), frameRenderPasses, FrameData(FrameData), SubpassInfo(..), Draw(..), DrawCallIndexed(..), BufferRef(..), RenderPassInfo(..) )
 import qualified Vulkan as Vk
 import qualified Vulkan.Zero as Vk
 import qualified Data.Vector as Vector
 import qualified Vulkan.Core10.FundamentalTypes as Extent2D (Extent2D(width, height))
-import Rort.Vulkan.Context (VkContext (..))
 import Rort.Vulkan (withVkRenderPass, withVkGraphicsPipelines, withVkFramebuffer, withVkPipelineLayout)
 import qualified Vulkan.Extensions.VK_KHR_surface as VkFormat
-import qualified Rort.Util.Resource as Resource
 import qualified Vulkan.CStruct.Extends as Vk
 import Data.Bits ((.|.))
 import Control.Monad (forM, forM_, unless)
 import Data.Functor ((<&>), void)
-import Rort.Render.Types (SubpassInfo(..), Draw (..), DrawCallIndexed (..), BufferRef (..), RenderPassInfo (..))
 import Rort.Render.FramesInFlight (FrameSync (..))
 import Data.Word (Word32)
 import Control.Monad.IO.Class (MonadIO (..))
 import Foreign (nullPtr)
+import Data.Acquire (Acquire)
 
 finallyPresent
   :: MonadIO m
@@ -87,11 +83,10 @@ finallyPresent device gfxQue presentQue swapchain fs f = do
     $ Vk.queuePresentKHR presentQue presentInfo
 
 mkFrameData
-  :: MonadResource m
-  => VkContext
+  :: VkContext
   -> Swapchain
   -> [RenderPassInfo]
-  -> m (Resource [FrameData])
+  -> Acquire [FrameData]
 mkFrameData ctx swapchain renderPassInfos = do
   renderPasses <- forM renderPassInfos $ \renderPassInfo -> do
     rp <- withVkRenderPass (vkDevice ctx)
@@ -135,7 +130,7 @@ mkFrameData ctx swapchain renderPassInfos = do
                    Vk.zero -- dependency flags
                )
     subpasses <-
-      fmap sequence $ forM (zip [0..] $ renderPassInfoSubpasses renderPassInfo) $ \(subpassIx, subpassInfo) -> do
+      forM (zip [0..] $ renderPassInfoSubpasses renderPassInfo) $ \(subpassIx, subpassInfo) -> do
         pipelineLayout <-
           withVkPipelineLayout (vkDevice ctx)
             $ Vk.PipelineLayoutCreateInfo
@@ -242,42 +237,38 @@ mkFrameData ctx swapchain renderPassInfos = do
                                      ]
                     )
             )
-            (Resource.get pipelineLayout)
-            (Resource.get rp)
+            pipelineLayout
+            rp
             subpassIx -- subpass index
             Vk.NULL_HANDLE -- pipeline handle (inheritance)
             (-1) -- pipeline index (inheritance)
 
         pipeline <-
-          fmap Vector.head <$> withVkGraphicsPipelines
+          Vector.head <$> withVkGraphicsPipelines
             (vkDevice ctx)
             Vk.NULL_HANDLE
             (Vector.singleton pipelineCreateInfo)
 
-        pure $
-          Subpass
-          <$> pipeline
-          <*> pipelineLayout
-          <*> pure (subpassInfoDraw subpassInfo)
+        pure $ Subpass pipeline pipelineLayout (subpassInfoDraw subpassInfo)
 
-    pure $ RenderPass <$> rp <*> subpasses
+    pure $ RenderPass rp subpasses
 
   frameDatas <-
     forM (Vector.toList $ vkImageViews swapchain) $ \iv -> do
-      fmap (fmap FrameData . sequence) <$> forM renderPasses $ \rp -> do
+      fmap FrameData <$> forM renderPasses $ \rp -> do
         framebuffer <- withVkFramebuffer (vkDevice ctx)
           $ Vk.FramebufferCreateInfo
             ()
             Vk.zero
-            (renderPass $ Resource.get rp) -- render pass
+            (renderPass rp) -- render pass
             (Vector.singleton iv) -- attachments
             -- dimensions
             (Extent2D.width $ vkExtent swapchain)
             (Extent2D.height $ vkExtent swapchain)
             1 -- layers
-        pure $ (,) <$> framebuffer <*> rp
+        pure (framebuffer, rp)
 
-  pure $ sequence frameDatas
+  pure frameDatas
 
 recordFrameData
   :: MonadIO m

@@ -15,6 +15,7 @@ import Data.Word (Word32)
 import qualified Vulkan.Zero as Vk
 import Data.Bits ((.&.), shift)
 import Control.Monad.IO.Class (liftIO)
+import Data.Acquire (Acquire, mkAcquire)
 
 withVkShaderModule
   :: MonadResource m
@@ -27,33 +28,30 @@ withVkShaderModule device shaderCreateInfo =
     (\shader -> Vk.destroyShaderModule device shader Nothing)
 
 withVkPipelineLayout
-  :: MonadResource m
-  => Vk.Device
+  :: Vk.Device
   -> Vk.PipelineLayoutCreateInfo
-  -> m (Resource Vk.PipelineLayout)
+  -> Acquire Vk.PipelineLayout
 withVkPipelineLayout device createInfo =
-  Resource.allocate
+  mkAcquire
     (Vk.createPipelineLayout device createInfo Nothing)
     (\pl -> Vk.destroyPipelineLayout device pl Nothing)
 
 withVkRenderPass
-  :: MonadResource m
-  => Vk.Device
+  :: Vk.Device
   -> Vk.RenderPassCreateInfo '[]
-  -> m (Resource Vk.RenderPass)
+  -> Acquire Vk.RenderPass
 withVkRenderPass device createInfo =
-  Resource.allocate
+  mkAcquire
     (Vk.createRenderPass device createInfo Nothing)
     (\rp -> Vk.destroyRenderPass device rp Nothing)
 
 withVkGraphicsPipelines
-  :: MonadResource m
-  => Vk.Device
+  :: Vk.Device
   -> Vk.PipelineCache
   -> Vector (Vk.GraphicsPipelineCreateInfo '[])
-  -> m (Resource (Vector Vk.Pipeline))
+  -> Acquire (Vector Vk.Pipeline)
 withVkGraphicsPipelines device pipelineCache pipelineInfos = do
-  Resource.allocate
+  mkAcquire
     (snd <$> Vk.createGraphicsPipelines
        device pipelineCache (Vk.SomeStruct <$> pipelineInfos) Nothing
     )
@@ -63,12 +61,11 @@ withVkGraphicsPipelines device pipelineCache pipelineInfos = do
     )
 
 withVkFramebuffer
-  :: MonadResource m
-  => Vk.Device
+  :: Vk.Device
   -> Vk.FramebufferCreateInfo '[]
-  -> m (Resource Vk.Framebuffer)
+  -> Acquire Vk.Framebuffer
 withVkFramebuffer device framebufferInfo = do
-  Resource.allocate
+  mkAcquire
     (Vk.createFramebuffer device framebufferInfo Nothing)
     (\fb -> Vk.destroyFramebuffer device fb Nothing)
 

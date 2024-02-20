@@ -33,6 +33,7 @@ import qualified Rort.Allocator as Allocator
 import qualified Chronos
 import Control.Lens ((%~))
 import UnliftIO.Async (race_, concurrently_)
+import Data.Acquire (with)
 
 main :: IO ()
 main = do
@@ -191,233 +192,226 @@ main = do
 
       startTime <- liftIO Chronos.now
 
-      retryOnSwapchainOutOfDate ctx initialSwapchain $ \swapchain -> do
-        -- BEGIN swapchain-dependent
-        let
-          subpassInfo =
-            SubpassInfo { subpassInfoShaderStages = pipelineShaderStages
-                        , subpassInfoDescriptors = [ Resource.get setLayout ]
-                        , subpassInfoVertexBindings =
-                            [ Vk.VertexInputBindingDescription
-                                0 -- first vertex buffer bound
-                                (fromIntegral $ sizeOf (undefined :: Float) * 5)
-                                Vk.VERTEX_INPUT_RATE_VERTEX
-                            ]
-                        , subpassInfoVertexAttributes =
-                          [ Vk.VertexInputAttributeDescription
-                              0 -- location (pos)
-                              0 -- binding
-                              Vk.FORMAT_R32G32_SFLOAT
-                              0 -- offset
-                          , Vk.VertexInputAttributeDescription
-                              1 -- location (color)
-                              0 -- binding
-                              Vk.FORMAT_R32G32B32_SFLOAT
-                              (fromIntegral $ sizeOf (undefined :: Float) * 2)
+      let
+        subpassInfo =
+          SubpassInfo { subpassInfoShaderStages = pipelineShaderStages
+                      , subpassInfoDescriptors = [ Resource.get setLayout ]
+                      , subpassInfoVertexBindings =
+                          [ Vk.VertexInputBindingDescription
+                              0 -- first vertex buffer bound
+                              (fromIntegral $ sizeOf (undefined :: Float) * 5)
+                              Vk.VERTEX_INPUT_RATE_VERTEX
                           ]
-                        , subpassInfoDraw =
-                            Draw { drawCall = IndexedDraw $ DrawCallIndexed
-                                     { drawCallIndexedIndexCount = 6
-                                     , drawCallIndexedInstanceCount = 1
-                                     , drawCallIndexedFirstIndex = 0
-                                     , drawCallIndexedVertexOffset = 0
-                                     , drawCallIndexedFirstInstance = 0
-                                     }
-                                 , drawVertexBuffers =
-                                    [ BufferRef (Resource.get deviceBuffer) 0 ]
-                                 , drawIndexBuffers =
-                                    [ ( BufferRef (Resource.get deviceBuffer) vertexBufferSize
-                                      , Vk.INDEX_TYPE_UINT16
-                                      )
-                                    ]
-                                 }
-                        }
-          renderPassInfo = RenderPassInfo [subpassInfo]
-        frameDatas <-
-          mkFrameData
-            ctx
-            swapchain
-            [renderPassInfo]
-        -- END swapchain-dependent
+                      , subpassInfoVertexAttributes =
+                        [ Vk.VertexInputAttributeDescription
+                            0 -- location (pos)
+                            0 -- binding
+                            Vk.FORMAT_R32G32_SFLOAT
+                            0 -- offset
+                        , Vk.VertexInputAttributeDescription
+                            1 -- location (color)
+                            0 -- binding
+                            Vk.FORMAT_R32G32B32_SFLOAT
+                            (fromIntegral $ sizeOf (undefined :: Float) * 2)
+                        ]
+                      , subpassInfoDraw =
+                          Draw { drawCall = IndexedDraw $ DrawCallIndexed
+                                   { drawCallIndexedIndexCount = 6
+                                   , drawCallIndexedInstanceCount = 1
+                                   , drawCallIndexedFirstIndex = 0
+                                   , drawCallIndexedVertexOffset = 0
+                                   , drawCallIndexedFirstInstance = 0
+                                   }
+                               , drawVertexBuffers =
+                                  [ BufferRef (Resource.get deviceBuffer) 0 ]
+                               , drawIndexBuffers =
+                                  [ ( BufferRef (Resource.get deviceBuffer) vertexBufferSize
+                                    , Vk.INDEX_TYPE_UINT16
+                                    )
+                                  ]
+                               }
+                      }
+        renderPassInfo = RenderPassInfo [subpassInfo]
 
+      retryOnSwapchainOutOfDate ctx initialSwapchain $ \swapchain -> do
+        with (mkFrameData ctx swapchain [renderPassInfo]) $ \frameDatas -> do
+          -- rendering a frame
+          let
+            renderLoop = do
+              withNextFrameInFlight (vkDevice ctx) framesInFlight $ \(FrameInFlight fs descPool cmdPool) -> runResourceT $ do
+                finallyPresent (vkDevice ctx) (vkGraphicsQueue ctx) (vkPresentationQueue ctx) (vkSwapchain swapchain) fs $ \imageIndex -> do
+                  set <-
+                    -- Not recommended to free descriptor sets, just reset pool. So
+                    -- we don't setup a destructor here.
+                    fmap Vector.head $ Vk.allocateDescriptorSets
+                      (vkDevice ctx)
+                      $ Vk.DescriptorSetAllocateInfo
+                          ()
+                          descPool
+                          (Vector.singleton $ Resource.get setLayout)
 
-        -- rendering a frame
-        let
-          renderLoop = do
-            withNextFrameInFlight (vkDevice ctx) framesInFlight $ \(FrameInFlight fs descPool cmdPool) -> runResourceT $ do
-              finallyPresent (vkDevice ctx) (vkGraphicsQueue ctx) (vkPresentationQueue ctx) (vkSwapchain swapchain) fs $ \imageIndex -> do
-                set <-
-                  -- Not recommended to free descriptor sets, just reset pool. So
-                  -- we don't setup a destructor here.
-                  fmap Vector.head $ Vk.allocateDescriptorSets
-                    (vkDevice ctx)
-                    $ Vk.DescriptorSetAllocateInfo
-                        ()
-                        descPool
-                        (Vector.singleton $ Resource.get setLayout)
+                  let
+                    uniformBufferSize =
+                      fromIntegral $ 3 * sizeOf(undefined :: M44 Float)
+                  (uniformBuffer, uniformBufferPtr) <- Resource.get
+                    <$> Allocator.withUniformBuffer
+                          (vkAllocator ctx)
+                          uniformBufferSize
 
-                let
-                  uniformBufferSize =
-                    fromIntegral $ 3 * sizeOf(undefined :: M44 Float)
-                (uniformBuffer, uniformBufferPtr) <- Resource.get
-                  <$> Allocator.withUniformBuffer
-                        (vkAllocator ctx)
-                        uniformBufferSize
+                  Vk.updateDescriptorSets (vkDevice ctx)
+                    -- writes
+                    (fmap Vk.SomeStruct . Vector.singleton
+                     $  Vk.WriteDescriptorSet
+                          ()
+                          set -- dst set
+                          0 -- dst binding
+                          0 -- dst array element
+                          1 -- descriptor count
+                          Vk.DESCRIPTOR_TYPE_UNIFORM_BUFFER -- type
+                          mempty -- image info
+                          -- buffer info
+                          ( Vector.singleton $
+                              Vk.DescriptorBufferInfo
+                                uniformBuffer
+                                0 -- offset
+                                uniformBufferSize
+                          )
+                          mempty -- texel buffer view
+                    )
+                    -- copies
+                    mempty
 
-                Vk.updateDescriptorSets (vkDevice ctx)
-                  -- writes
-                  (fmap Vk.SomeStruct . Vector.singleton
-                   $  Vk.WriteDescriptorSet
-                        ()
-                        set -- dst set
-                        0 -- dst binding
-                        0 -- dst array element
-                        1 -- descriptor count
-                        Vk.DESCRIPTOR_TYPE_UNIFORM_BUFFER -- type
-                        mempty -- image info
-                        -- buffer info
-                        ( Vector.singleton $
-                            Vk.DescriptorBufferInfo
-                              uniformBuffer
-                              0 -- offset
-                              uniformBufferSize
+                  currentTime <- liftIO Chronos.now
+                  let
+                    newUniformBufferData =
+                      getUniformBufferData
+                        startTime
+                        currentTime
+                        ( fromIntegral . Extent2D.width $ vkExtent swapchain
+                        , fromIntegral . Extent2D.height $ vkExtent swapchain
                         )
-                        mempty -- texel buffer view
-                  )
-                  -- copies
-                  mempty
+                  liftIO $ pokeArray (castPtr @() @(M44 Float) $ uniformBufferPtr) newUniformBufferData
 
-                currentTime <- liftIO Chronos.now
-                let
-                  newUniformBufferData =
-                    getUniformBufferData
-                      startTime
-                      currentTime
-                      ( fromIntegral . Extent2D.width $ vkExtent swapchain
-                      , fromIntegral . Extent2D.height $ vkExtent swapchain
-                      )
-                liftIO $ pokeArray (castPtr @() @(M44 Float) $ uniformBufferPtr) newUniformBufferData
+                  cmdBuffers <-
+                    withVkCommandBuffers
+                      (vkDevice ctx)
+                      $ Vk.CommandBufferAllocateInfo
+                          cmdPool
+                          -- Primary = can be submitted to queue for execution, can't be
+                          -- called by other command buffers.
+                          Vk.COMMAND_BUFFER_LEVEL_PRIMARY
+                          1 -- count
 
-                cmdBuffers <-
-                  withVkCommandBuffers
-                    (vkDevice ctx)
-                    $ Vk.CommandBufferAllocateInfo
-                        cmdPool
-                        -- Primary = can be submitted to queue for execution, can't be
-                        -- called by other command buffers.
-                        Vk.COMMAND_BUFFER_LEVEL_PRIMARY
-                        1 -- count
-
-                let cmdBuffer = Vector.head $ Resource.get cmdBuffers
-                Vk.beginCommandBuffer cmdBuffer
-                  $ Vk.CommandBufferBeginInfo
-                      ()
-                      Vk.zero
-                      Nothing -- Inheritance info
-
-                let
-                  frameData = Resource.get frameDatas !! fromIntegral imageIndex
-
-                forM_ (frameRenderPasses frameData) $ \(framebuffer, rp) -> do
-                  let
-                    clearValues = Vector.fromList [Vk.Color $ Vk.Float32 0 0 0 0]
-                    renderStartPos = Vk.Offset2D 0 0
-                    renderExtent = vkExtent swapchain
-                    renderPassBeginInfo =
-                      Vk.RenderPassBeginInfo
+                  let cmdBuffer = Vector.head $ Resource.get cmdBuffers
+                  Vk.beginCommandBuffer cmdBuffer
+                    $ Vk.CommandBufferBeginInfo
                         ()
-                        (renderPass rp)
-                        framebuffer
-                        (Vk.Rect2D renderStartPos renderExtent)
-                        clearValues
-
-                  Vk.cmdBeginRenderPass
-                    cmdBuffer renderPassBeginInfo Vk.SUBPASS_CONTENTS_INLINE
+                        Vk.zero
+                        Nothing -- Inheritance info
 
                   let
-                    viewport = Vk.Viewport
-                      0 -- startX
-                      0 -- startY
-                      (fromIntegral $ Extent2D.width renderExtent) -- width
-                      (fromIntegral $ Extent2D.height renderExtent) -- height
-                      0 -- min depth
-                      1 -- max depth
-                    scissor = Vk.Rect2D renderStartPos renderExtent
-                  Vk.cmdSetViewport
-                    cmdBuffer
-                    0
-                    (Vector.singleton viewport)
-                  Vk.cmdSetScissor
-                    cmdBuffer
-                    0
-                    (Vector.singleton scissor)
+                    frameData = frameDatas !! fromIntegral imageIndex
 
-                  forM_ (renderPassSubpasses rp) $ \(Subpass pipeline pipelineLayout draw) -> do
-                    Vk.cmdBindPipeline
-                      cmdBuffer
-                      Vk.PIPELINE_BIND_POINT_GRAPHICS
-                      pipeline
+                  forM_ (frameRenderPasses frameData) $ \(framebuffer, rp) -> do
+                    let
+                      clearValues = Vector.fromList [Vk.Color $ Vk.Float32 0 0 0 0]
+                      renderStartPos = Vk.Offset2D 0 0
+                      renderExtent = vkExtent swapchain
+                      renderPassBeginInfo =
+                        Vk.RenderPassBeginInfo
+                          ()
+                          (renderPass rp)
+                          framebuffer
+                          (Vk.Rect2D renderStartPos renderExtent)
+                          clearValues
+
+                    Vk.cmdBeginRenderPass
+                      cmdBuffer renderPassBeginInfo Vk.SUBPASS_CONTENTS_INLINE
 
                     let
-                      (vertexBufs, vertexOffsets) =
-                        unzip
-                        $ drawVertexBuffers draw
-                        <&> \(BufferRef vertexBuf offset) -> (vertexBuf, offset)
-                    unless (null vertexBufs) $
-                      Vk.cmdBindVertexBuffers
-                        cmdBuffer
-                        0 -- first binding
-                        (Vector.fromList vertexBufs)
-                        (Vector.fromList vertexOffsets)
-                    forM_ (drawIndexBuffers draw) $ \(BufferRef indexBuf offset, indexType) -> do
-                      Vk.cmdBindIndexBuffer
-                        cmdBuffer
-                        indexBuf
-                        offset
-                        indexType
-
-                    Vk.cmdBindDescriptorSets
+                      viewport = Vk.Viewport
+                        0 -- startX
+                        0 -- startY
+                        (fromIntegral $ Extent2D.width renderExtent) -- width
+                        (fromIntegral $ Extent2D.height renderExtent) -- height
+                        0 -- min depth
+                        1 -- max depth
+                      scissor = Vk.Rect2D renderStartPos renderExtent
+                    Vk.cmdSetViewport
                       cmdBuffer
-                      Vk.PIPELINE_BIND_POINT_GRAPHICS
-                      pipelineLayout
-                      0 -- first set
-                      (Vector.singleton set)
-                      mempty -- dynamic offsets
+                      0
+                      (Vector.singleton viewport)
+                    Vk.cmdSetScissor
+                      cmdBuffer
+                      0
+                      (Vector.singleton scissor)
 
-                    case drawCall draw of
-                      (IndexedDraw (DrawCallIndexed indexCount instanceCount firstIndex vertexOffset firstInstance)) ->
-                        Vk.cmdDrawIndexed
-                          cmdBuffer indexCount instanceCount firstIndex vertexOffset firstInstance
-                      (PrimitiveDraw (DrawCallPrimitive firstVertex firstInstance instanceCount vertexCount)) ->
-                        Vk.cmdDraw
-                          cmdBuffer vertexCount instanceCount firstVertex firstInstance
+                    forM_ (renderPassSubpasses rp) $ \(Subpass pipeline pipelineLayout draw) -> do
+                      Vk.cmdBindPipeline
+                        cmdBuffer
+                        Vk.PIPELINE_BIND_POINT_GRAPHICS
+                        pipeline
 
-                  Vk.cmdEndRenderPass cmdBuffer
+                      let
+                        (vertexBufs, vertexOffsets) =
+                          unzip
+                          $ drawVertexBuffers draw
+                          <&> \(BufferRef vertexBuf offset) -> (vertexBuf, offset)
+                      unless (null vertexBufs) $
+                        Vk.cmdBindVertexBuffers
+                          cmdBuffer
+                          0 -- first binding
+                          (Vector.fromList vertexBufs)
+                          (Vector.fromList vertexOffsets)
+                      forM_ (drawIndexBuffers draw) $ \(BufferRef indexBuf offset, indexType) -> do
+                        Vk.cmdBindIndexBuffer
+                          cmdBuffer
+                          indexBuf
+                          offset
+                          indexType
 
-                Vk.endCommandBuffer cmdBuffer
-                pure cmdBuffer
+                      Vk.cmdBindDescriptorSets
+                        cmdBuffer
+                        Vk.PIPELINE_BIND_POINT_GRAPHICS
+                        pipelineLayout
+                        0 -- first set
+                        (Vector.singleton set)
+                        mempty -- dynamic offsets
 
-            renderLoop
+                      case drawCall draw of
+                        (IndexedDraw (DrawCallIndexed indexCount instanceCount firstIndex vertexOffset firstInstance)) ->
+                          Vk.cmdDrawIndexed
+                            cmdBuffer indexCount instanceCount firstIndex vertexOffset firstInstance
+                        (PrimitiveDraw (DrawCallPrimitive firstVertex firstInstance instanceCount vertexCount)) ->
+                          Vk.cmdDraw
+                            cmdBuffer vertexCount instanceCount firstVertex firstInstance
 
-          eventLoop :: ResourceT IO ()
-          eventLoop = do
-            shouldContinue <- liftIO $ withWindowEvent win $ \mEv -> do
-              case mEv of
-                Just (WindowError err) -> do
-                  putStrLn $ "Error " <> show err
-                  closeWindow win
-                  pure False
-                Just WindowClose -> do
-                  putStrLn "Window closing..."
-                  closeWindow win
-                  pure False
-                Just (WindowResize x y) -> do
-                  putStrLn $ "Window resizing (" <> show x <> ", " <> show y <> ")"
-                  pure True
-                Nothing -> pure True
-            when shouldContinue eventLoop
+                    Vk.cmdEndRenderPass cmdBuffer
 
-        race_ eventLoop (concurrently_ renderLoop renderLoop)
+                  Vk.endCommandBuffer cmdBuffer
+                  pure cmdBuffer
+
+              renderLoop
+
+            eventLoop :: ResourceT IO ()
+            eventLoop = do
+              shouldContinue <- liftIO $ withWindowEvent win $ \mEv -> do
+                case mEv of
+                  Just (WindowError err) -> do
+                    putStrLn $ "Error " <> show err
+                    closeWindow win
+                    pure False
+                  Just WindowClose -> do
+                    putStrLn "Window closing..."
+                    closeWindow win
+                    pure False
+                  Just (WindowResize x y) -> do
+                    putStrLn $ "Window resizing (" <> show x <> ", " <> show y <> ")"
+                    pure True
+                  Nothing -> pure True
+              when shouldContinue eventLoop
+
+          race_ eventLoop (concurrently_ renderLoop renderLoop)
 
 getUniformBufferData
   :: Chronos.Time -> Chronos.Time -> (Int, Int) -> [M44 Float]

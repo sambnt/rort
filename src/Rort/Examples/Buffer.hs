@@ -23,6 +23,7 @@ import Control.Monad (when)
 import Foreign (sizeOf, Word16, castPtr, pokeArray, advancePtr)
 import Rort.Window.Types (WindowEvent(..))
 import Rort.Render.FramesInFlight (withFramesInFlight, withNextFrameInFlight, FrameInFlight (FrameInFlight))
+import Data.Acquire (with)
 
 main :: IO ()
 main = do
@@ -207,57 +208,52 @@ main = do
                                  }
                         }
           renderPassInfo = RenderPassInfo [subpassInfo]
-        frameDatas <-
-          mkFrameData
-            ctx
-            swapchain
-            [renderPassInfo]
-        -- END swapchain-dependent
 
-        -- rendering a frame
-        let
-          -- loop :: ResourceT IO ()
-          loop = do
-            withNextFrameInFlight (vkDevice ctx) framesInFlight $ \(FrameInFlight fs _descPool cmdPool) -> runResourceT $ do
-              finallyPresent (vkDevice ctx) (vkGraphicsQueue ctx) (vkPresentationQueue ctx) (vkSwapchain swapchain) fs $ \imageIndex -> do
-                cmdBuffers <-
-                  withVkCommandBuffers
-                    (vkDevice ctx)
-                    $ Vk.CommandBufferAllocateInfo
-                        cmdPool
-                        -- Primary = can be submitted to queue for execution, can't be
-                        -- called by other command buffers.
-                        Vk.COMMAND_BUFFER_LEVEL_PRIMARY
-                        1 -- count
+        with (mkFrameData ctx swapchain [renderPassInfo]) $ \frameDatas -> do
+          -- rendering a frame
+          let
+            -- loop :: ResourceT IO ()
+            loop = do
+              withNextFrameInFlight (vkDevice ctx) framesInFlight $ \(FrameInFlight fs _descPool cmdPool) -> runResourceT $ do
+                finallyPresent (vkDevice ctx) (vkGraphicsQueue ctx) (vkPresentationQueue ctx) (vkSwapchain swapchain) fs $ \imageIndex -> do
+                  cmdBuffers <-
+                    withVkCommandBuffers
+                      (vkDevice ctx)
+                      $ Vk.CommandBufferAllocateInfo
+                          cmdPool
+                          -- Primary = can be submitted to queue for execution, can't be
+                          -- called by other command buffers.
+                          Vk.COMMAND_BUFFER_LEVEL_PRIMARY
+                          1 -- count
 
-                let cmdBuffer = Vector.head $ Resource.get cmdBuffers
-                Vk.beginCommandBuffer cmdBuffer
-                  $ Vk.CommandBufferBeginInfo
-                      ()
-                      Vk.zero
-                      Nothing -- Inheritance info
+                  let cmdBuffer = Vector.head $ Resource.get cmdBuffers
+                  Vk.beginCommandBuffer cmdBuffer
+                    $ Vk.CommandBufferBeginInfo
+                        ()
+                        Vk.zero
+                        Nothing -- Inheritance info
 
-                let
-                  frameData = Resource.get frameDatas !! fromIntegral imageIndex
+                  let
+                    frameData = frameDatas !! fromIntegral imageIndex
 
-                recordFrameData cmdBuffer swapchain frameData
+                  recordFrameData cmdBuffer swapchain frameData
 
-                Vk.endCommandBuffer cmdBuffer
-                pure cmdBuffer
+                  Vk.endCommandBuffer cmdBuffer
+                  pure cmdBuffer
 
-            mEv <- liftIO $ getWindowEvent win
-            shouldContinue <- liftIO $ case mEv of
-              Just (WindowError err) -> do
-                putStrLn $ "Error " <> show err
-                closeWindow win
-                pure False
-              Just WindowClose -> do
-                putStrLn "Window closing..."
-                closeWindow win
-                pure False
-              Just (WindowResize x y) -> do
-                putStrLn $ "Window resizing (" <> show x <> ", " <> show y <> ")"
-                pure True
-              Nothing -> pure True
-            when shouldContinue loop
-        loop
+              mEv <- liftIO $ getWindowEvent win
+              shouldContinue <- liftIO $ case mEv of
+                Just (WindowError err) -> do
+                  putStrLn $ "Error " <> show err
+                  closeWindow win
+                  pure False
+                Just WindowClose -> do
+                  putStrLn "Window closing..."
+                  closeWindow win
+                  pure False
+                Just (WindowResize x y) -> do
+                  putStrLn $ "Window resizing (" <> show x <> ", " <> show y <> ")"
+                  pure True
+                Nothing -> pure True
+              when shouldContinue loop
+          loop
