@@ -5,7 +5,7 @@ module Rort.Render.Swapchain where
 
 import qualified Vulkan as Vk
 import qualified Vulkan.Exception as Vk
-import Control.Monad.Trans.Resource (MonadResource, MonadUnliftIO)
+import Control.Monad.Trans.Resource (MonadResource, MonadUnliftIO, ReleaseKey, release)
 import qualified Vulkan.Zero as Vk
 import Rort.Vulkan.Context (VkContext, vkDevice, swapchainSupportCapabilities, swapchainSupportPresentModes, querySwapchainSupport, swapchainSupportFormats, vkSurface, vkPhysicalDevice, graphicsQueueFamilies, presentationQueueFamilies, vkQueueFamilies, vkGetFramebufferSize)
 import Data.Word (Word32)
@@ -20,9 +20,8 @@ import qualified Vulkan.Extensions.VK_KHR_display_swapchain as VkSwapchain
 import qualified Vulkan.Core10.FundamentalTypes as Extent2D (Extent2D(width, height))
 import Data.List.NonEmpty (NonEmpty)
 import Data.Bits ((.&.))
-import Rort.Util.Resource (Resource)
-import qualified Rort.Util.Resource as Resource
 import Control.Exception.Safe (Exception, MonadCatch, SomeException, throwIO, try, fromException)
+import Data.Acquire (Acquire, mkAcquire, allocateAcquire)
 
 data Swapchain
   = Swapchain { vkSwapchain                :: Vk.SwapchainKHR
@@ -61,20 +60,20 @@ throwSwapchainSubOptimal result            = pure result
 retryOnSwapchainOutOfDate
   :: (MonadCatch m, MonadResource m, MonadUnliftIO m)
   => VkContext
-  -> Resource Swapchain
+  -> (ReleaseKey, Swapchain)
   -> (Swapchain -> m a)
   -> m a
-retryOnSwapchainOutOfDate ctx initialSwapchain f = do
-  eResult <- try $ f $ Resource.get initialSwapchain
+retryOnSwapchainOutOfDate ctx (initialRelKey, initialSwapchain) f = do
+  eResult <- try $ f initialSwapchain
   case eResult of
     Left SwapchainOutOfDate -> do
       framebufferSize <- liftIO $ vkGetFramebufferSize ctx
       swapchain <-
-        withSwapchain
+        allocateAcquire $ withSwapchain
           ctx
           framebufferSize
-          (Just $ Resource.get initialSwapchain)
-      liftIO $ Resource.free initialSwapchain
+          (Just initialSwapchain)
+      liftIO $ release initialRelKey
       -- Retry the computation
       retryOnSwapchainOutOfDate ctx swapchain f
     Right result ->
@@ -84,13 +83,24 @@ retryOnSwapchainOutOfDate ctx initialSwapchain f = do
   -- undesirable consequences. It seemed to swallow asynchronous exceptions.
   -- I'm not sure why, but I don't recommend looping in an exception handler.
 
-withSwapchain
-  :: MonadResource m
-  -- TODO: Don't give context to swapchain
+manageSwapchain
+  :: (MonadResource m, MonadCatch m, MonadUnliftIO m)
   => VkContext
+  -> (Swapchain -> m b)
+  -- ^ Function is re-called every time with new swapchain when old swapchain
+  -- becomes out of date.
+  -> m b
+manageSwapchain ctx f = do
+  framebufferSize <- liftIO $ vkGetFramebufferSize ctx
+  swapchain <- allocateAcquire $ withSwapchain ctx framebufferSize Nothing
+  retryOnSwapchainOutOfDate ctx swapchain f
+
+withSwapchain
+  -- TODO: Don't give context to swapchain
+  :: VkContext
   -> (Int, Int) -- ^ Frame buffer size
   -> Maybe Swapchain -- ^ Old swapchain
-  -> m (Resource Swapchain)
+  -> Acquire Swapchain
 withSwapchain ctx framebufferSize mOldSwapchain = do
   sci <- liftIO $ mkSwapchainCreateInfo
            (vkPhysicalDevice ctx)
@@ -104,19 +114,19 @@ withSwapchain ctx framebufferSize mOldSwapchain = do
   let format = VkSwapchain.imageFormat sci
       colorSpace = VkSwapchain.imageColorSpace sci
 
-  sc <- Resource.allocate
+  sc <- mkAcquire
     (Vk.createSwapchainKHR (vkDevice ctx) sci Nothing)
     (\sc -> Vk.destroySwapchainKHR (vkDevice ctx) sc Nothing)
-  (_, images) <- liftIO $ Vk.getSwapchainImagesKHR (vkDevice ctx) (Resource.get sc)
-  ivs <- Resource.allocate
+  (_, images) <- liftIO $ Vk.getSwapchainImagesKHR (vkDevice ctx) sc
+  ivs <- mkAcquire
     (forM images (createSwapchainImageView (vkDevice ctx) format))
     (\ivs -> forM_ ivs (\iv -> Vk.destroyImageView (vkDevice ctx) iv Nothing))
 
-  pure $ Swapchain <$> sc
-                   <*> ivs
-                   <*> pure (Vk.SurfaceFormatKHR format colorSpace)
-                   <*> pure depthFormat
-                   <*> pure (VkSwapchain.imageExtent sci)
+  pure $ Swapchain sc
+                   ivs
+                   (Vk.SurfaceFormatKHR format colorSpace)
+                   depthFormat
+                   (VkSwapchain.imageExtent sci)
 
 mkSwapchainCreateInfo
   :: MonadIO m

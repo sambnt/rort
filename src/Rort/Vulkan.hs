@@ -3,10 +3,8 @@
 
 module Rort.Vulkan where
 import qualified Vulkan as Vk
-import Control.Monad.Trans.Resource (MonadResource, runResourceT)
+import Control.Monad.Trans.Resource (runResourceT)
 import qualified Vulkan.Core10.MemoryManagement as VkMem
-import Rort.Util.Resource (Resource)
-import qualified Rort.Util.Resource as Resource
 import qualified Vulkan.CStruct.Extends as Vk
 import Control.Monad (forM_)
 import Data.Vector (Vector)
@@ -15,15 +13,14 @@ import Data.Word (Word32)
 import qualified Vulkan.Zero as Vk
 import Data.Bits ((.&.), shift)
 import Control.Monad.IO.Class (liftIO)
-import Data.Acquire (Acquire, mkAcquire)
+import Data.Acquire (Acquire, mkAcquire, with)
 
 withVkShaderModule
-  :: MonadResource m
-  => Vk.Device
+  :: Vk.Device
   -> Vk.ShaderModuleCreateInfo '[]
-  -> m (Resource Vk.ShaderModule)
+  -> Acquire Vk.ShaderModule
 withVkShaderModule device shaderCreateInfo =
-  Resource.allocate
+  mkAcquire
     (Vk.createShaderModule device shaderCreateInfo Nothing)
     (\shader -> Vk.destroyShaderModule device shader Nothing)
 
@@ -70,10 +67,9 @@ withVkFramebuffer device framebufferInfo = do
     (\fb -> Vk.destroyFramebuffer device fb Nothing)
 
 withVkCommandPool
-  :: MonadResource m
-  => Vk.Device
+  :: Vk.Device
   -> Word32
-  -> m (Resource Vk.CommandPool)
+  -> Acquire Vk.CommandPool
 withVkCommandPool device queueFamilyIx =
   let
     poolInfo =
@@ -81,17 +77,16 @@ withVkCommandPool device queueFamilyIx =
         Vk.zero
         queueFamilyIx
   in
-    Resource.allocate
+    mkAcquire
       (Vk.createCommandPool device poolInfo Nothing)
       (\cmdPool -> Vk.destroyCommandPool device cmdPool Nothing)
 
 withVkCommandBuffers
-  :: MonadResource m
-  => Vk.Device
+  :: Vk.Device
   -> Vk.CommandBufferAllocateInfo
-  -> m (Resource (Vector Vk.CommandBuffer))
+  -> Acquire (Vector Vk.CommandBuffer)
 withVkCommandBuffers device allocInfo =
-  Resource.allocate
+  mkAcquire
     (Vk.allocateCommandBuffers device allocInfo)
     -- TODO: Is it a good idea to wait for the device to be idle?
     (\cmd ->
@@ -100,22 +95,20 @@ withVkCommandBuffers device allocInfo =
     )
 
 withVkBuffer
-  :: MonadResource m
-  => Vk.Device
+  :: Vk.Device
   -> Vk.BufferCreateInfo '[]
-  -> m (Resource Vk.Buffer)
+  -> Acquire Vk.Buffer
 withVkBuffer device createInfo =
-  Resource.allocate
+  mkAcquire
     (Vk.createBuffer device createInfo Nothing)
     (\buffer -> Vk.destroyBuffer device buffer Nothing)
 
 withVkBufferMemory
-  :: MonadResource m
-  => Vk.PhysicalDevice
+  :: Vk.PhysicalDevice
   -> Vk.Device
   -> Vk.Buffer
   -> Vk.MemoryPropertyFlagBits
-  -> m (Resource VkMem.DeviceMemory)
+  -> Acquire VkMem.DeviceMemory
 withVkBufferMemory physDevice device buf memProperties = do
   memRequirements <- liftIO $ Vk.getBufferMemoryRequirements device buf
 
@@ -130,58 +123,53 @@ withVkBufferMemory physDevice device buf memProperties = do
       (VkMem.size memRequirements)
       typIx
 
-  Resource.allocate
+  mkAcquire
     (Vk.allocateMemory device allocInfo Nothing)
     (\mem -> Vk.freeMemory device mem Nothing)
 
 withVkDescriptorSetLayout
-  :: MonadResource m
-  => Vk.Device
+  :: Vk.Device
   -> Vk.DescriptorSetLayoutCreateInfo '[]
-  -> m (Resource Vk.DescriptorSetLayout)
+  -> Acquire Vk.DescriptorSetLayout
 withVkDescriptorSetLayout device createInfo =
-  Resource.allocate
+  mkAcquire
     (Vk.createDescriptorSetLayout device createInfo Nothing)
     (\dsl -> Vk.destroyDescriptorSetLayout device dsl Nothing)
 
 withVkDescriptorPool
-  :: MonadResource m
-  => Vk.Device
+  :: Vk.Device
   -> Vk.DescriptorPoolCreateInfo '[]
-  -> m (Resource Vk.DescriptorPool)
+  -> Acquire Vk.DescriptorPool
 withVkDescriptorPool device createInfo =
-  Resource.allocate
+  mkAcquire
     (Vk.createDescriptorPool device createInfo Nothing)
     (\pool -> Vk.destroyDescriptorPool device pool Nothing)
 
 withVkDescriptorSet
-  :: MonadResource m
-  => Vk.Device
+  :: Vk.Device
   -> Vk.DescriptorSetAllocateInfo '[]
-  -> m (Resource [Vk.DescriptorSet])
-withVkDescriptorSet device allocInfo = fmap Vector.toList
-  <$> Resource.allocate
-        (Vk.allocateDescriptorSets device allocInfo)
-        -- TODO: Not recommended to free descriptor sets, just free pool
-        (Vk.freeDescriptorSets device (Vk.descriptorPool allocInfo))
+  -> Acquire [Vk.DescriptorSet]
+withVkDescriptorSet device allocInfo =
+  Vector.toList <$> mkAcquire
+    (Vk.allocateDescriptorSets device allocInfo)
+    -- TODO: Not recommended to free descriptor sets, just free pool
+    (Vk.freeDescriptorSets device (Vk.descriptorPool allocInfo))
 
 withVkFence
-  :: MonadResource m
-  => Vk.Device
+  :: Vk.Device
   -> Vk.FenceCreateInfo '[]
-  -> m (Resource Vk.Fence)
+  -> Acquire Vk.Fence
 withVkFence logicalDevice fenceInfo =
-  Resource.allocate
+  mkAcquire
     (Vk.createFence logicalDevice fenceInfo Nothing)
     (\fence -> Vk.destroyFence logicalDevice fence Nothing)
 
 withVkSemaphore
-  :: MonadResource m
-  => Vk.Device
+  :: Vk.Device
   -> Vk.SemaphoreCreateInfo '[]
-  -> m (Resource Vk.Semaphore)
+  -> Acquire Vk.Semaphore
 withVkSemaphore logicalDevice semaphoreInfo =
-  Resource.allocate
+  mkAcquire
     (Vk.createSemaphore logicalDevice semaphoreInfo Nothing)
     (\sem -> Vk.destroySemaphore logicalDevice sem Nothing)
 
@@ -227,38 +215,37 @@ copyBuffer device cmdPool que size bufferSrc bufferDst = runResourceT $ do
         Vk.COMMAND_BUFFER_LEVEL_PRIMARY -- level
         1 -- count
 
-  commandBuffers <- withVkCommandBuffers device allocInfo
-  let
-    commandBuffer = Vector.head $ Resource.get commandBuffers
-    beginInfo = Vk.CommandBufferBeginInfo
-      ()
-      Vk.COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
-      Nothing -- inheritance info
+  with (withVkCommandBuffers device allocInfo) $ \commandBuffers -> do
+    let
+      commandBuffer = Vector.head commandBuffers
+      beginInfo = Vk.CommandBufferBeginInfo
+        ()
+        Vk.COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
+        Nothing -- inheritance info
 
-  liftIO $ Vk.beginCommandBuffer commandBuffer beginInfo
+    Vk.beginCommandBuffer commandBuffer beginInfo
 
-  let
-    copyRegion =
-      Vk.BufferCopy
-        0 -- src offset
-        0 -- dst offset
-        size -- size
+    let
+      copyRegion =
+        Vk.BufferCopy
+          0 -- src offset
+          0 -- dst offset
+          size -- size
 
-  liftIO $
     Vk.cmdCopyBuffer
       commandBuffer
       bufferSrc
       bufferDst
       (Vector.singleton copyRegion)
 
-  liftIO $ Vk.endCommandBuffer commandBuffer
-  let
-    submitInfo = Vk.SubmitInfo
-      ()
-      mempty -- wait semaphores
-      mempty -- wait dst stage mask
-      (Vector.singleton (Vk.commandBufferHandle commandBuffer)) -- commandBuffers
-      mempty -- signal semaphores
+    Vk.endCommandBuffer commandBuffer
+    let
+      submitInfo = Vk.SubmitInfo
+        ()
+        mempty -- wait semaphores
+        mempty -- wait dst stage mask
+        (Vector.singleton (Vk.commandBufferHandle commandBuffer)) -- commandBuffers
+        mempty -- signal semaphores
 
-  liftIO $ Vk.queueSubmit que (Vector.singleton $ Vk.SomeStruct submitInfo) Vk.NULL_HANDLE
-  liftIO $ Vk.queueWaitIdle que
+    Vk.queueSubmit que (Vector.singleton $ Vk.SomeStruct submitInfo) Vk.NULL_HANDLE
+    Vk.queueWaitIdle que

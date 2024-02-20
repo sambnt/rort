@@ -3,10 +3,8 @@
 
 module Rort.Vulkan.Context where
 
-import Control.Monad.Trans.Resource (MonadResource)
 import qualified Vulkan.Core10.DeviceInitialization as VkDev
-import qualified Control.Monad.Trans.Resource as ResourceT
-import Rort.Window (Window, withSurface, getFramebufferSize)
+import Rort.Window (Window, withVkSurface, getFramebufferSize)
 import Data.Vector (Vector)
 import qualified Data.Vector as Vector
 import qualified Data.ByteString.Char8 as BSC
@@ -24,9 +22,9 @@ import Data.Bits ((.&.))
 import qualified Vulkan.CStruct.Extends as Vk
 import Data.Function ((&))
 import qualified Data.Set as Set
-import qualified Rort.Util.Resource as Resource
 import Rort.Allocator (Allocator)
 import qualified Rort.Allocator as Allocator
+import Data.Acquire (Acquire, mkAcquire)
 
 data VkContext = VkContext { vkInstance           :: Vk.Instance
                            , vkSurface            :: Vk.SurfaceKHR
@@ -62,10 +60,9 @@ data SwapchainSupportDetails
   deriving (Show)
 
 withVkContext
-  :: MonadResource m
-  => VkSettings
+  :: VkSettings
   -> Window
-  -> m VkContext
+  -> Acquire VkContext
 withVkContext cfg win = do
   liftIO $ checkExts (requiredExtensions cfg)
   liftIO $ checkValidationLayers (requiredValidationLayers cfg)
@@ -79,8 +76,8 @@ withVkContext cfg win = do
         (requiredValidationLayers cfg)
         (requiredExtensions cfg)
 
-  inst <- withInstance createInfo
-  surface <- withSurface inst win
+  inst <- withVkInstance createInfo
+  surface <- withVkSurface inst win
 
   let deviceExts = Vector.fromList ["VK_KHR_swapchain"]
 
@@ -90,7 +87,7 @@ withVkContext cfg win = do
     Nothing -> error "No physical device found that supports graphics operations"
     Just (physicalDevice, queFamilies) -> do
       logicalDevice <-
-        withLogicalDevice
+        withVkLogicalDevice
           physicalDevice
           queFamilies
           deviceExts
@@ -130,24 +127,22 @@ withVkContext cfg win = do
                        , vkPresentationQueue  = presentQueue
                        , vkGraphicsQueue      = gfxQueue
                        , vkTransferQueue      = transferQueue
-                       , vkAllocator          = Resource.get allocator
+                       , vkAllocator          = allocator
                        }
-withInstance
-  :: MonadResource m
-  => Vk.InstanceCreateInfo '[]
-  -> m Vk.Instance
-withInstance createInfo =
-  snd <$> ResourceT.allocate
+withVkInstance
+  :: Vk.InstanceCreateInfo '[]
+  -> Acquire Vk.Instance
+withVkInstance createInfo =
+  mkAcquire
     (Vk.createInstance createInfo Nothing)
     (`Vk.destroyInstance` Nothing)
 
-withLogicalDevice
-  :: MonadResource m
-  => Vk.PhysicalDevice
+withVkLogicalDevice
+  :: Vk.PhysicalDevice
   -> QueueFamilies
   -> Vector BSC.ByteString
-  -> m Vk.Device
-withLogicalDevice device queFamilies exts = do
+  -> Acquire Vk.Device
+withVkLogicalDevice device queFamilies exts = do
   let
     queueCreateInfos = flip foldMap (uniqueQueueFamilies queFamilies) $ \qfIx ->
       [ Vk.DeviceQueueCreateInfo
@@ -171,9 +166,9 @@ withLogicalDevice device queFamilies exts = do
       exts
       deviceFeatures
 
-  snd <$> ResourceT.allocate
-      (Vk.createDevice device logicalDeviceCreateInfo Nothing)
-      (`Vk.destroyDevice` Nothing)
+  mkAcquire
+    (Vk.createDevice device logicalDeviceCreateInfo Nothing)
+    (`Vk.destroyDevice` Nothing)
 
 uniqueQueueFamilies :: QueueFamilies -> NonEmpty Word32
 uniqueQueueFamilies qf =

@@ -1,7 +1,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Rort.Window ( Window
                    , withWindow
-                   , withSurface
+                   , withVkSurface
                    , getRequiredExtensions
                    , getFramebufferSize
                    , getWindowEvent
@@ -13,10 +13,10 @@ import Numeric.Natural (Natural)
 import qualified Rort.Window.GLFW as RortGLFW
 import Data.Text (Text)
 import qualified Vulkan as Vk
-import Control.Monad.Trans.Resource (MonadResource)
 import Data.Vector (Vector)
 import qualified Data.ByteString.Char8 as BSC
 import Rort.Window.Types (WindowEvent)
+import Data.Acquire (Acquire)
 
 data Window = GLFW RortGLFW.WindowGLFW
 
@@ -32,12 +32,11 @@ withWindow width height title f =
 getFramebufferSize :: Window -> IO (Int, Int)
 getFramebufferSize (GLFW w) = RortGLFW.getFramebufferSize w
 
-withSurface
-  :: MonadResource m
-  => Vk.Instance
+withVkSurface
+  :: Vk.Instance
   -> Window
-  -> m Vk.SurfaceKHR
-withSurface vkInst (GLFW w) = RortGLFW.withSurface vkInst w
+  -> Acquire Vk.SurfaceKHR
+withVkSurface vkInst (GLFW w) = RortGLFW.withVkSurface vkInst w
 
 getRequiredExtensions :: Window -> IO (Vector BSC.ByteString)
 getRequiredExtensions (GLFW w) = RortGLFW.getRequiredExtensions w

@@ -10,11 +10,9 @@ import Data.Word (Word32, Word64)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import qualified Vulkan as Vk
 import qualified Vulkan.Dynamic as VkDynamic
-import qualified Rort.Util.Resource as Resource
-import Control.Monad.Trans.Resource (MonadResource)
 import qualified Data.Vector as Vector
 import Foreign.Ptr (Ptr)
-import Rort.Util.Resource (Resource)
+import Data.Acquire (Acquire, mkAcquire)
 
 type Allocator = Vma.Allocator
 
@@ -58,22 +56,20 @@ destroy :: MonadIO m => Allocator -> m ()
 destroy = Vma.destroyAllocator
 
 withAllocator
-  :: MonadResource m
-  => Vk.PhysicalDevice
+  :: Vk.PhysicalDevice
   -> Vk.Device
   -> Vk.Instance
   -> Word32
-  -> m (Resource.Resource Vma.Allocator)
+  -> Acquire Vma.Allocator
 withAllocator physicalDevice device inst vulkanApiVersion =
-  Resource.allocate
+  mkAcquire
     (create physicalDevice device inst vulkanApiVersion)
     destroy
 
 withUniformBuffer
-  :: MonadResource m
-  => Allocator
+  :: Allocator
   -> Word64
-  -> m (Resource (Vk.Buffer, Ptr ()))
+  -> Acquire (Vk.Buffer, Ptr ())
 withUniformBuffer allocator size = do
   -- See
   -- https://gpuopen-librariesandsdks.github.io/VulkanMemoryAllocator/html/usage_patterns.html#usage_patterns_advanced_data_uploadi
@@ -102,16 +98,14 @@ withUniformBuffer allocator size = do
         nullPtr -- userdata
         0 -- priority
 
-  allocation <- Resource.allocate
+  allocation <- mkAcquire
     (Vma.createBuffer allocator bufferCreateInfo allocCreateInfo)
     (\(buffer, alloc, _allocInfo) -> Vma.destroyBuffer allocator buffer alloc)
 
-  let (_buf, alloc, _allocInfo) = Resource.get allocation
+  let (buf, alloc, allocInfo) = allocation
 
   _memPropFlags
      <- liftIO $ Vma.getAllocationMemoryProperties allocator alloc
 
   -- TODO: Handle non-host-visible memory
-  pure $ do
-    (buf, _alloc, allocInfo) <- allocation
-    pure (buf, allocInfo.mappedData)
+  pure (buf, allocInfo.mappedData)

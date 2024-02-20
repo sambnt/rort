@@ -7,7 +7,6 @@ import Numeric.Natural (Natural)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Graphics.UI.GLFW as GLFW
-import qualified Control.Monad.Trans.Resource as ResourceT
 import qualified Data.Vector as Vector
 import qualified Vulkan as Vk
 import Control.Exception.Safe (bracket, mask, onException)
@@ -21,8 +20,8 @@ import Data.Int (Int32)
 import Foreign (alloca, peek)
 import Foreign.C (peekCString)
 import Foreign.Ptr (nullPtr)
-import Control.Monad.Trans.Resource (MonadResource)
 import Data.Bifunctor (bimap)
+import Data.Acquire (Acquire, mkAcquire)
 
 data WindowGLFW = WindowGLFW GLFW.Window (TQueue WindowEvent)
 
@@ -106,12 +105,11 @@ getRequiredExtensions (WindowGLFW _ _) = do
   exts <- traverse (fmap BSC.pack . peekCString) rawExts
   pure $ Vector.fromList exts
 
-withSurface
-  :: MonadResource m
-  => Vk.Instance
+withVkSurface
+  :: Vk.Instance
   -> WindowGLFW
-  -> m Vk.SurfaceKHR
-withSurface vkInst (WindowGLFW win _) =
+  -> Acquire Vk.SurfaceKHR
+withVkSurface vkInst (WindowGLFW win _) =
   let
     acquire = alloca $ \ptr -> do
       s <- GLFW.createWindowSurface (Vk.instanceHandle vkInst) win nullPtr ptr
@@ -121,7 +119,7 @@ withSurface vkInst (WindowGLFW win _) =
           "Failed to create window surface, exit code was: '" <> show res <> "'"
     release surface = Vk.destroySurfaceKHR vkInst surface Nothing
   in
-    snd <$> ResourceT.allocate acquire release
+    mkAcquire acquire release
 
 getFramebufferSize :: WindowGLFW -> IO (Int, Int)
 getFramebufferSize (WindowGLFW w _) =
