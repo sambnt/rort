@@ -1,10 +1,11 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleContexts #-}
 
 module Rort.Render where
 
 import Rort.Vulkan.Context ( VkContext(..) )
-import Rort.Render.Swapchain (Swapchain, vkSurfaceFormat, vkImageViews, vkExtent, throwSwapchainOutOfDate, throwSwapchainSubOptimal)
+import Rort.Render.Swapchain (Swapchain, vkSurfaceFormat, vkImageViews, vkExtent, throwSwapchainOutOfDate, throwSwapchainSubOptimal, withSwapchain, vkSwapchain, SwapchainOutOfDate (SwapchainOutOfDate))
 import Rort.Render.Types ( RenderPassInfo, FrameData, DrawCall(PrimitiveDraw, IndexedDraw), Subpass(Subpass), DrawCallPrimitive(..), RenderPass(..), frameRenderPasses, FrameData(FrameData), SubpassInfo(..), Draw(..), DrawCallIndexed(..), BufferRef(..), RenderPassInfo(..) )
 import qualified Vulkan as Vk
 import qualified Vulkan.Zero as Vk
@@ -16,11 +17,98 @@ import qualified Vulkan.CStruct.Extends as Vk
 import Data.Bits ((.|.))
 import Control.Monad (forM, forM_, unless)
 import Data.Functor ((<&>), void)
-import Rort.Render.FramesInFlight (FrameSync (..))
+import Rort.Render.FramesInFlight (FrameSync (..), FramesInFlight, withFramesInFlight, NumFramesInFlight, FrameInFlight (FrameInFlight), withNextFrameInFlight)
 import Data.Word (Word32)
 import Control.Monad.IO.Class (MonadIO (..))
 import Foreign (nullPtr)
-import Data.Acquire (Acquire)
+import Data.Acquire (Acquire, allocateAcquire)
+import Control.Monad.Trans.Resource (ReleaseKey, MonadResource, runResourceT, MonadUnliftIO, ResourceT, release)
+import Control.Concurrent.STM (TMVar, newTMVarIO)
+import qualified Control.Concurrent.STM as STM
+import Control.Exception.Safe (try, bracket, MonadMask, onException, mask)
+import Control.Concurrent (MVar, readMVar, withMVar)
+
+data SwapchainData a
+  = SwapchainData { swapchainDataSwapchain :: Swapchain
+                  , swapchainDataImages    :: [a]
+                  }
+
+data Renderer a
+  = Renderer { rendererSwapchainData :: TMVar (ReleaseKey, SwapchainData a)
+             , rendererFramesInFlight :: FramesInFlight
+             , rendererImageFn :: Swapchain -> Acquire [a]
+             }
+
+withRenderer
+  :: MonadResource m
+  => VkContext
+  -> NumFramesInFlight
+  -> (Swapchain -> Acquire [a])
+  -> m (Renderer a)
+withRenderer ctx numFramesInFlight imageF = do
+  framesInFlight <-
+    withFramesInFlight (vkDevice ctx) (vkQueueFamilies ctx) numFramesInFlight
+
+  framebufferSize <-
+    liftIO $ vkGetFramebufferSize ctx
+  swapchainDat <-
+    allocateAcquire $ do
+      swapchain <- withSwapchain ctx framebufferSize Nothing
+      images <- imageF swapchain
+      pure $ SwapchainData swapchain images
+
+  swapchainData <-
+    liftIO $ newTMVarIO swapchainDat
+
+  pure $ Renderer swapchainData framesInFlight imageF
+
+step
+  :: ( MonadResource m
+     , MonadMask m
+     , MonadUnliftIO m
+     )
+  => VkContext
+  -> Renderer a
+  -> (a -> Swapchain -> Vk.DescriptorPool -> Vk.CommandPool -> ResourceT m Vk.CommandBuffer)
+  -> m ()
+step ctx (Renderer swapchainVar framesInFlight imageF) f = do
+  (_, swapchainData@(SwapchainData swapchain imageDatas)) <-
+      liftIO $ STM.atomically $ STM.readTMVar swapchainVar
+  eResult <- try $ withNextFrameInFlight
+    (vkDevice ctx)
+    framesInFlight
+    $ \(FrameInFlight fs descPool cmdPool) -> runResourceT $ do
+      finallyPresent
+        (vkDevice ctx)
+        (vkGraphicsQueue ctx)
+        (vkPresentationQueue ctx)
+        (vkSwapchain swapchain) fs
+        $ \imageIndex -> do
+          let
+            imageData = imageDatas !! fromIntegral imageIndex
+          f imageData swapchain descPool cmdPool
+  case eResult of
+    Left SwapchainOutOfDate -> do
+      let
+        x (oldRelKey, oldSwapchainData) = do
+          if vkSwapchain (swapchainDataSwapchain oldSwapchainData) /= vkSwapchain (swapchainDataSwapchain swapchainData)
+          then pure (oldRelKey, oldSwapchainData)
+          else do
+            framebufferSize <-
+              liftIO $ vkGetFramebufferSize ctx
+            swapchainDat <-
+              allocateAcquire $ do
+                sc <- withSwapchain ctx framebufferSize (Just swapchain)
+                images <- imageF sc
+                pure $ SwapchainData sc images
+            release oldRelKey
+            pure swapchainDat
+      mask $ \restore -> do
+        s <- liftIO $ STM.atomically $ STM.takeTMVar swapchainVar
+        r <- restore (x s) `onException` liftIO (STM.atomically $ STM.putTMVar swapchainVar s)
+        liftIO $ STM.atomically $ STM.putTMVar swapchainVar r
+    Right result ->
+      pure result
 
 finallyPresent
   :: MonadIO m

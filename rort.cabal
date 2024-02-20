@@ -63,6 +63,7 @@ library
   exposed-modules:  Rort.Examples.Triangle
                   , Rort.Examples.Buffer
                   , Rort.Examples.Uniform
+                  , Rort.Examples.FRP
                   , Rort.Window
                   , Rort.Window.GLFW
                   , Rort.Window.Types
