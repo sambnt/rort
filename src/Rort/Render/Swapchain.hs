@@ -23,8 +23,8 @@ import Data.List.NonEmpty (NonEmpty)
 import Data.Bits ((.&.))
 import Rort.Util.Resource (Resource)
 import qualified Rort.Util.Resource as Resource
-import Control.Monad.Catch (Exception, handleIf, MonadCatch)
-import Control.Exception (throwIO, try, SomeException, fromException)
+import Control.Monad.Catch (Exception, handleIf, MonadCatch, try)
+import Control.Exception (throwIO, SomeException, fromException)
 
 data Swapchain
   = Swapchain { vkSwapchain                :: Vk.SwapchainKHR
@@ -67,19 +67,20 @@ retryOnSwapchainOutOfDate
   -> (Swapchain -> m a)
   -> m a
 retryOnSwapchainOutOfDate ctx initialSwapchain f = do
-  handleIf isSwapchainOutOfDate
-    (\_ -> do
-        framebufferSize <- liftIO $ vkGetFramebufferSize ctx
-        swapchain <-
-          withSwapchain
-            ctx
-            framebufferSize
-            (Just $ Resource.get initialSwapchain)
-        liftIO $ Resource.free initialSwapchain
-        -- Retry the computation
-        retryOnSwapchainOutOfDate ctx swapchain f
-    )
-    (f $ Resource.get initialSwapchain)
+  eResult <- try $ f $ Resource.get initialSwapchain
+  case eResult of
+    Left SwapchainOutOfDate -> do
+      framebufferSize <- liftIO $ vkGetFramebufferSize ctx
+      swapchain <-
+        withSwapchain
+          ctx
+          framebufferSize
+          (Just $ Resource.get initialSwapchain)
+      liftIO $ Resource.free initialSwapchain
+      -- Retry the computation
+      retryOnSwapchainOutOfDate ctx swapchain f
+    Right result ->
+      pure result
 
 withSwapchain
   :: MonadResource m
