@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE DataKinds #-}
 
 module Rort.Allocator where
 
@@ -11,8 +12,10 @@ import Control.Monad.IO.Class (MonadIO, liftIO)
 import qualified Vulkan as Vk
 import qualified Vulkan.Dynamic as VkDynamic
 import qualified Data.Vector as Vector
+import qualified Vulkan.Core10.Image as VkImage
 import Foreign.Ptr (Ptr)
 import Data.Acquire (Acquire, mkAcquire)
+import Data.Bits ((.&.))
 
 type Allocator = Vma.Allocator
 
@@ -65,6 +68,66 @@ withAllocator physicalDevice device inst vulkanApiVersion =
   mkAcquire
     (create physicalDevice device inst vulkanApiVersion)
     destroy
+
+withImage :: Allocator -> Vk.ImageCreateInfo '[] -> Word64 -> Acquire (Vk.Image, Ptr())
+withImage allocator imageCreateInfo imgDataSize = do
+  let
+    allocCreateInfo =
+      Vma.AllocationCreateInfo
+        -- Flags
+        ( Vma.ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
+        .|. Vma.ALLOCATION_CREATE_HOST_ACCESS_ALLOW_TRANSFER_INSTEAD_BIT
+        .|. Vma.ALLOCATION_CREATE_MAPPED_BIT
+        )
+        Vma.MEMORY_USAGE_AUTO
+        Vk.zero -- required flags
+        Vk.zero -- preferred flags
+        Vk.zero -- Accept any memory types that meet the requirements
+        Vk.NULL_HANDLE -- pool to create allocation in
+        nullPtr -- userdata
+        0 -- priority
+
+  (img, alloc, allocInfo) <- mkAcquire
+    (Vma.createImage allocator imageCreateInfo allocCreateInfo)
+    (\(img, alloc, allocInfo) -> Vma.destroyImage allocator img alloc)
+
+  memPropFlags
+     <- liftIO $ Vma.getAllocationMemoryProperties allocator alloc
+  liftIO $ print $ memPropFlags .&. Vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT == Vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT
+  if (memPropFlags .&. Vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT == Vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT)
+  then
+    pure (img, allocInfo.mappedData)
+  else do
+    let
+      stagingBufferCreateInfo =
+        Vk.BufferCreateInfo
+          ()
+          Vk.zero
+          imgDataSize
+          Vk.BUFFER_USAGE_TRANSFER_SRC_BIT
+          Vk.SHARING_MODE_EXCLUSIVE
+          Vector.empty
+      stagingAllocCreateInfo =
+        Vma.AllocationCreateInfo
+          -- Flags
+          ( Vma.ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
+          .|. Vma.ALLOCATION_CREATE_MAPPED_BIT
+          )
+          Vma.MEMORY_USAGE_AUTO
+          Vk.zero -- required flags
+          Vk.zero -- preferred flags
+          Vk.zero -- Accept any memory types that meet the requirements
+          Vk.NULL_HANDLE -- pool to create allocation in
+          nullPtr -- userdata
+          0 -- priority
+
+    (stagingBuf, stagingAlloc, stagingAllocInfo) <- mkAcquire
+      (Vma.createBuffer allocator stagingBufferCreateInfo stagingAllocCreateInfo)
+      (\(buf, bufAlloc, _) -> Vma.destroyBuffer allocator buf bufAlloc)
+    liftIO $ print stagingAllocInfo.mappedData
+
+    pure (img, stagingAllocInfo.mappedData)
+
 
 withUniformBuffer
   :: Allocator
