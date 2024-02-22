@@ -5,7 +5,7 @@ module Main where
 import qualified Graphics.UI.GLFW as GLFW
 import Control.Monad (when)
 import Control.Concurrent (threadDelay)
-import Control.Exception (bracket)
+import Control.Exception.Safe (bracket)
 import Vulkan.Core10.Enums.PipelineBindPoint (PipelineBindPoint(PipelineBindPoint))
 import qualified Vulkan as Vk
 import qualified Vulkan.Zero as Vk

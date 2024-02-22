@@ -1,7 +1,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Test.Rort.Util.Resource where
 
-import Control.Exception (SomeException, throwIO)
+import Control.Exception.Safe (SomeException, throwIO)
 import Control.Monad.Catch (catch, onException, mask, bracket, MonadMask (uninterruptibleMask))
 import Control.Concurrent (threadDelay, killThread, forkIO)
 import Rort.Util.Resource (fromResourceT, Resource)

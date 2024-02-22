@@ -10,7 +10,6 @@ import qualified Graphics.UI.GLFW as GLFW
 import qualified Control.Monad.Trans.Resource as ResourceT
 import qualified Data.Vector as Vector
 import qualified Vulkan as Vk
-import Control.Monad.Catch (bracket)
 import Control.Monad (when)
 import Control.Concurrent.STM (TQueue)
 import qualified Control.Concurrent.STM as STM
@@ -23,8 +22,7 @@ import Foreign.C (peekCString)
 import Foreign.Ptr (nullPtr)
 import Control.Monad.Trans.Resource (MonadResource)
 import Data.Bifunctor (bimap)
-import Control.Exception (onException)
-import Control.Exception (mask)
+import Control.Exception.Safe (mask, onException, bracket)
 
 data WindowGLFW = WindowGLFW GLFW.Window (TQueue WindowEvent)
 

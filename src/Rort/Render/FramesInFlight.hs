@@ -4,7 +4,7 @@ import Control.Concurrent.STM (TQueue, newTQueueIO)
 import qualified Control.Concurrent.STM as STM
 import qualified Vulkan as Vk
 import Control.Monad.IO.Class (MonadIO, liftIO)
-import Control.Monad.Catch (MonadMask, bracket, finally, mask, onException, uninterruptibleMask_)
+import Control.Exception.Safe (MonadMask, bracket, finally, mask, onException, uninterruptibleMask_)
 import Control.Monad.Trans.Resource (MonadResource)
 import Data.Word (Word32)
 import Control.Monad (replicateM_)

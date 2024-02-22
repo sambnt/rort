@@ -5,8 +5,7 @@ module Rort.Render.Swapchain where
 
 import qualified Vulkan as Vk
 import qualified Vulkan.Exception as Vk
-import Control.Monad.Trans.Resource (MonadResource, runResourceT, MonadUnliftIO)
-import qualified Control.Monad.Trans.Resource as ResourceT
+import Control.Monad.Trans.Resource (MonadResource, MonadUnliftIO)
 import qualified Vulkan.Zero as Vk
 import Rort.Vulkan.Context (VkContext, vkDevice, swapchainSupportCapabilities, swapchainSupportPresentModes, querySwapchainSupport, swapchainSupportFormats, vkSurface, vkPhysicalDevice, graphicsQueueFamilies, presentationQueueFamilies, vkQueueFamilies, vkGetFramebufferSize)
 import Data.Word (Word32)
@@ -23,8 +22,7 @@ import Data.List.NonEmpty (NonEmpty)
 import Data.Bits ((.&.))
 import Rort.Util.Resource (Resource)
 import qualified Rort.Util.Resource as Resource
-import Control.Monad.Catch (Exception, handleIf, MonadCatch, try)
-import Control.Exception (throwIO, SomeException, fromException)
+import Control.Exception.Safe (throwIO, SomeException, fromException, Exception, MonadCatch, try)
 
 data Swapchain
   = Swapchain { vkSwapchain                :: Vk.SwapchainKHR
