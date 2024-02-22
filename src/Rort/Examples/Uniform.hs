@@ -32,6 +32,8 @@ import Data.Function ((&))
 import qualified Rort.Allocator as Allocator
 import qualified Chronos
 import Control.Lens ((%~))
+import UnliftIO.Async (race_, concurrently)
+import UnliftIO (concurrently_)
 
 main :: IO ()
 main = do
@@ -47,7 +49,8 @@ main = do
         cfg = VkSettings { requiredExtensions =
                              windowExts <> Vector.fromList []
                          , requiredValidationLayers =
-                             Vector.fromList [ "VK_LAYER_KHRONOS_validation" ]
+                             -- Vector.fromList [ "VK_LAYER_KHRONOS_validation" ]
+                             Vector.fromList [ "VK_LAYER_RENDERDOC_Capture" ]
                          , applicationInfo =
                              Vk.ApplicationInfo
                                (Just "Example: Uniform")  -- application name
@@ -241,8 +244,7 @@ main = do
 
         -- rendering a frame
         let
-          -- loop :: ResourceT IO ()
-          loop = do
+          renderLoop = do
             withNextFrameInFlight (vkDevice ctx) framesInFlight $ \(FrameInFlight fs descPool cmdPool) -> runResourceT $ do
               finallyPresent (vkDevice ctx) (vkGraphicsQueue ctx) (vkPresentationQueue ctx) (vkSwapchain swapchain) fs $ \imageIndex -> do
                 set <-
@@ -395,7 +397,10 @@ main = do
 
                 Vk.endCommandBuffer cmdBuffer
                 pure cmdBuffer
+            renderLoop
 
+
+          eventLoop = do
             mEv <- liftIO $ getWindowEvent win
             shouldContinue <- liftIO $ case mEv of
               Just (WindowError err) -> do
@@ -410,8 +415,9 @@ main = do
                 putStrLn $ "Window resizing (" <> show x <> ", " <> show y <> ")"
                 pure True
               Nothing -> pure True
-            when shouldContinue loop
-        loop
+            when shouldContinue eventLoop
+
+        race_ eventLoop renderLoop
 
 getUniformBufferData
   :: Chronos.Time -> Chronos.Time -> (Int, Int) -> [M44 Float]

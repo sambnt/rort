@@ -49,6 +49,7 @@ library
                   , bitmap
                   , stb-image
                   , stm
+                  , unliftio
                   , vector
                   , VulkanMemoryAllocator
                   , bytestring
