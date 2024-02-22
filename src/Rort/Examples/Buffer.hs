@@ -4,7 +4,7 @@
 
 module Rort.Examples.Buffer where
 
-import Rort.Window (withWindow, getRequiredExtensions, getWindowEvent, closeWindow)
+import Rort.Window (withWindow, getRequiredExtensions, withWindowEvent, closeWindow)
 import Rort.Vulkan.Context (withVkContext, VkSettings (..), VkContext (..), graphicsQueueFamilies)
 import Control.Monad.Trans.Resource (runResourceT)
 import qualified Data.Vector as Vector
@@ -245,20 +245,21 @@ main = do
                 Vk.endCommandBuffer cmdBuffer
                 pure cmdBuffer
 
-            mEv <- liftIO $ getWindowEvent win
-            shouldContinue <- liftIO $ case mEv of
-              Just (WindowError err) -> do
-                putStrLn $ "Error " <> show err
-                closeWindow win
-                pure False
-              Just WindowClose -> do
-                putStrLn "Window closing..."
-                closeWindow win
-                pure False
-              Just (WindowResize x y) -> do
-                putStrLn $ "Window resizing (" <> show x <> ", " <> show y <> ")"
-                pure True
-              Nothing -> pure True
+            shouldContinue <- liftIO $ withWindowEvent win $ \mEv -> do
+              case mEv of
+                Just (WindowError err) -> do
+                  putStrLn $ "Error " <> show err
+                  closeWindow win
+                  pure False
+                Just WindowClose -> do
+                  putStrLn "Window closing..."
+                  closeWindow win
+                  pure False
+                Just (WindowResize x y) -> do
+                  putStrLn $ "Window resizing (" <> show x <> ", " <> show y <> ")"
+                  pure True
+                Nothing ->
+                  pure True
             when shouldContinue loop
         loop
 

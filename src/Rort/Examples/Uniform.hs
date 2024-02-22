@@ -3,7 +3,7 @@
 
 module Rort.Examples.Uniform where
 
-import Rort.Window (withWindow, getRequiredExtensions, getWindowEvent, closeWindow)
+import Rort.Window (withWindow, getRequiredExtensions, withWindowEvent, closeWindow)
 import Rort.Vulkan.Context (withVkContext, VkSettings (..), VkContext (..), graphicsQueueFamilies)
 import Control.Monad.Trans.Resource (runResourceT)
 import qualified Data.Vector as Vector
@@ -32,8 +32,7 @@ import Data.Function ((&))
 import qualified Rort.Allocator as Allocator
 import qualified Chronos
 import Control.Lens ((%~))
-import UnliftIO.Async (race_, concurrently)
-import UnliftIO (concurrently_)
+import UnliftIO.Async (race_)
 
 main :: IO ()
 main = do
@@ -401,20 +400,21 @@ main = do
 
 
           eventLoop = do
-            mEv <- liftIO $ getWindowEvent win
-            shouldContinue <- liftIO $ case mEv of
-              Just (WindowError err) -> do
-                putStrLn $ "Error " <> show err
-                closeWindow win
-                pure False
-              Just WindowClose -> do
-                putStrLn "Window closing..."
-                closeWindow win
-                pure False
-              Just (WindowResize x y) -> do
-                putStrLn $ "Window resizing (" <> show x <> ", " <> show y <> ")"
-                pure True
-              Nothing -> pure True
+            shouldContinue <- liftIO $ withWindowEvent win $ \mEv -> do
+              case mEv of
+                Just (WindowError err) -> do
+                  putStrLn $ "Error " <> show err
+                  closeWindow win
+                  pure False
+                Just WindowClose -> do
+                  putStrLn "Window closing..."
+                  closeWindow win
+                  pure False
+                Just (WindowResize x y) -> do
+                  putStrLn $ "Window resizing (" <> show x <> ", " <> show y <> ")"
+                  pure True
+                Nothing ->
+                  pure True
             when shouldContinue eventLoop
 
         race_ eventLoop renderLoop
