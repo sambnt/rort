@@ -66,19 +66,6 @@ onceOff ctx = do
           Nothing
       ]
 
-  setLayout <- withVkDescriptorSetLayout (vkDevice ctx)
-    $ Vk.DescriptorSetLayoutCreateInfo
-        ()
-        Vk.zero
-        (Vector.fromList [ Vk.DescriptorSetLayoutBinding
-                             0 -- binding in shader
-                             Vk.DESCRIPTOR_TYPE_UNIFORM_BUFFER
-                             1 -- descriptor count
-                             Vk.SHADER_STAGE_VERTEX_BIT
-                             Vector.empty -- immutable samplers
-                         ]
-        )
-
   let
     vertices :: [Float]
     vertices = [ -0.5, -0.5, 1, 0, 0
@@ -163,7 +150,15 @@ onceOff ctx = do
   let
     subpassInfo =
       SubpassInfo { subpassInfoShaderStages = pipelineShaderStages
-                  , subpassInfoDescriptors = [ setLayout ]
+                  , subpassInfoDescriptors =
+                      [  [ Vk.DescriptorSetLayoutBinding
+                             0 -- binding in shader
+                             Vk.DESCRIPTOR_TYPE_UNIFORM_BUFFER
+                             1 -- descriptor count
+                             Vk.SHADER_STAGE_VERTEX_BIT
+                             Vector.empty -- immutable samplers
+                         ]
+                      ]
                   , subpassInfoVertexBindings =
                       [ Vk.VertexInputBindingDescription
                           0 -- first vertex buffer bound
