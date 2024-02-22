@@ -13,10 +13,10 @@ import Numeric.Natural (Natural)
 import qualified Rort.Window.GLFW as RortGLFW
 import Data.Text (Text)
 import qualified Vulkan as Vk
-import Control.Monad.Trans.Resource (MonadResource)
 import Data.Vector (Vector)
 import qualified Data.ByteString.Char8 as BSC
 import Rort.Window.Types (WindowEvent)
+import Data.Acquire (Acquire)
 
 data Window = GLFW RortGLFW.WindowGLFW
 
@@ -33,10 +33,9 @@ getFramebufferSize :: Window -> IO (Int, Int)
 getFramebufferSize (GLFW w) = RortGLFW.getFramebufferSize w
 
 withSurface
-  :: MonadResource m
-  => Vk.Instance
+  :: Vk.Instance
   -> Window
-  -> m Vk.SurfaceKHR
+  -> Acquire Vk.SurfaceKHR
 withSurface vkInst (GLFW w) = RortGLFW.withSurface vkInst w
 
 getRequiredExtensions :: Window -> IO (Vector BSC.ByteString)

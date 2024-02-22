@@ -5,16 +5,15 @@ import qualified Control.Concurrent.STM as STM
 import qualified Vulkan as Vk
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Exception.Safe (MonadMask, bracket, finally, mask, onException, uninterruptibleMask_)
-import Control.Monad.Trans.Resource (MonadResource)
+import Control.Monad.Trans.Resource (MonadResource, ReleaseKey, release)
 import Data.Word (Word32)
 import Control.Monad (replicateM_)
 import qualified Vulkan.Zero as Vk
 import Rort.Vulkan (withFence, withSemaphore, withVkDescriptorPool, withVkCommandPool)
-import Rort.Util.Resource (Resource)
-import qualified Rort.Util.Resource as Resource
 import qualified Data.Vector as Vector
 import Rort.Vulkan.Context (QueueFamilies, graphicsQueueFamilies)
 import qualified Data.List.NonEmpty as NE
+import Data.Acquire (Acquire, allocateAcquire)
 
 data FrameSync
   = FrameSync { fsFenceInFlight           :: Vk.Fence
@@ -28,7 +27,7 @@ data FrameInFlight = FrameInFlight { fifFrameSynce     :: FrameSync
                                    }
 
 data FramesInFlight
-  = FramesInFlight { framesInFlightFrameSync      :: TQueue (Resource FrameSync)
+  = FramesInFlight { framesInFlightFrameSync      :: TQueue (ReleaseKey, FrameSync)
                    , framesInFlightDescriptorPool :: TQueue Vk.DescriptorPool
                    , framesInFlightCommandPool    :: TQueue Vk.CommandPool
                    }
@@ -70,13 +69,13 @@ acquireFrameSync
      , MonadResource m
      )
   => Vk.Device
-  -> TQueue (Resource FrameSync)
-  -> (FrameSync -> m b)
-  -> m b
+  -> TQueue (ReleaseKey, FrameSync)
+  -> (FrameSync -> m r)
+  -> m r
 acquireFrameSync device que f = do
   mask $ \restore -> do
-    fs <- liftIO . STM.atomically . STM.readTQueue $ que
-    r <- restore (f (Resource.get fs)) `onException` do
+    (relKey, fs) <- liftIO . STM.atomically . STM.readTQueue $ que
+    r <- restore (f fs) `onException` do
       -- If we've encountered an exception while using the frame sync, it's very
       -- likely that we've left one of the fences or semaphores in an invalid
       -- state. We shouldn't try to re-use the frame sync, instead we just
@@ -87,10 +86,10 @@ acquireFrameSync device que f = do
       uninterruptibleMask_ $ do
         -- NOTE: We are assuming that none of these operations will block for a
         -- long time.
-        fs' <- withFrameSync device
-        liftIO $ Resource.free fs
+        fs' <- allocateAcquire $ withFrameSync device
+        release relKey
         liftIO . STM.atomically . STM.writeTQueue que $ fs'
-    _ <- liftIO . STM.atomically . STM.writeTQueue que $ fs
+    _ <- liftIO . STM.atomically . STM.writeTQueue que $ (relKey, fs)
     pure r
 
 withNextFrameInFlight
@@ -119,7 +118,7 @@ withFramesInFlight device queueFamilies numFramesInFlight = do
   cmdPoolQue        <- liftIO newTQueueIO
 
   replicateM_ (fromIntegral numFramesInFlight) $ do
-    fs <- withFrameSync device
+    fs <- allocateAcquire $ withFrameSync device
     -- TODO: We just hard-code some large sizes for the pool. In the future we
     -- might analyse the render graph to allocate the right number of descriptor
     -- sets, OR we could use a free list of descriptor pools.
@@ -127,8 +126,8 @@ withFramesInFlight device queueFamilies numFramesInFlight = do
       maxSets = 1024
       maxUniformBuffers = 8192
       maxImageSamplers = 8192
-    descPool <-
-      fmap Resource.get $ withVkDescriptorPool
+    (_, descPool) <-
+      allocateAcquire $ withVkDescriptorPool
         device
         $ Vk.DescriptorPoolCreateInfo
             ()
@@ -140,8 +139,8 @@ withFramesInFlight device queueFamilies numFramesInFlight = do
                 ]
             )
     -- Allocate our command pool for this frame
-    cmdPool <-
-      Resource.get <$> withVkCommandPool
+    (_, cmdPool) <-
+      allocateAcquire $ withVkCommandPool
         device
         (NE.head . graphicsQueueFamilies $ queueFamilies)
     liftIO $ STM.atomically $ do
@@ -152,9 +151,8 @@ withFramesInFlight device queueFamilies numFramesInFlight = do
   pure $ FramesInFlight frameSyncQue descriptorPoolQue cmdPoolQue
 
 withFrameSync
-  :: MonadResource m
-  => Vk.Device
-  -> m (Resource FrameSync)
+  :: Vk.Device
+  -> Acquire FrameSync
 withFrameSync logicalDevice = do
   let
     -- Create the fence pre-signalled so the first time we wait on the fence in
@@ -164,7 +162,4 @@ withFrameSync logicalDevice = do
   inFlightFence <- withFence logicalDevice fenceInfo
   renderFinishedSem <- withSemaphore logicalDevice semaphoreInfo
   imageAvailableSem <- withSemaphore logicalDevice semaphoreInfo
-  pure $ FrameSync
-    <$> inFlightFence
-    <*> imageAvailableSem
-    <*> renderFinishedSem
+  pure $ FrameSync inFlightFence imageAvailableSem renderFinishedSem

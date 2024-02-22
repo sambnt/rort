@@ -71,7 +71,6 @@ library
                   , Rort.Render.Swapchain
                   , Rort.Render.FramesInFlight
                   , Rort.Render
-                  , Rort.Util.Resource
 
 executable rort
     import:           project-config
