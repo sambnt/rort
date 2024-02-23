@@ -21,6 +21,7 @@ common project-config
 library
   import:           project-config
   build-depends:    base >=4.7 && <5
+                  , array
                   , async
                   , aeson
                   , megaparsec
@@ -67,6 +68,8 @@ library
                   , Rort.Vulkan
                   , Rort.Allocator
                   , Rort.Vulkan.Context
+                  , Rort.Render.Pool
+                  , Rort.Render.ResourcePool
                   , Rort.Render.Types
                   , Rort.Render.Swapchain
                   , Rort.Render.FramesInFlight
