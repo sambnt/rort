@@ -29,105 +29,134 @@ import Foreign (nullPtr, Storable, pokeArray, advancePtr, castPtr)
 import Data.Acquire (Acquire, with, allocateAcquire)
 import Control.Concurrent.STM (TVar)
 import qualified Control.Concurrent.STM as STM
-import Data.ByteString.Lazy (ByteString, unpack)
-import Rort.Render.Pool (Pool, newPool, Handle, addItem, getItem)
+import qualified Data.ByteString.Lazy as BSL
+import qualified Data.ByteString as BS
+-- import Rort.Render.Pool (Pool, newPool, Handle, addItem, getItem)
 import Control.Monad.Trans.Resource (MonadResource, MonadUnliftIO)
 import Control.Monad.Cont (ContT(ContT), runContT)
+import Rort.Util.Defer (Deferred, defer, evalM, getSeed, eval)
 
-data Renderer = Renderer { shaders :: Pool ShaderCreateInfo
-                         , buffers :: Pool BufferCreateInfo
-                         }
+data Renderer
 
 data BufferCreateInfo
   = BufferCreateInfo { usage :: Vk.BufferUsageFlagBits
-                     , dat :: Acquire (Word64, ByteString)
+                     , dat :: Acquire (Word64, BSL.ByteString)
                      }
+
+data Buffer
+  = Buffer { buffer :: Vk.Buffer
+           }
 
 data ShaderCreateInfo
   = ShaderCreateInfo { shaderStage :: Vk.ShaderStageFlagBits
-                     , entryFn     :: ByteString
-                     , dat         :: Acquire ByteString
+                     , entryFn     :: BS.ByteString
+                     , dat         :: Acquire BSL.ByteString
                      }
 
-data ShaderCreated
-  = ShaderCreated { pipelineShaderStage :: Vk.PipelineShaderStageCreateInfo '[]
-                  }
+data Shader
+  = Shader { pipelineShaderStage :: Vk.PipelineShaderStageCreateInfo '[]
+           }
 
-create :: IO Renderer
-create = STM.atomically $ Renderer <$> newPool 64 <*> newPool 64
+-- create :: IO Renderer
+-- create = STM.atomically $ Renderer <$> newPool 64 <*> newPool 64
+
+data Handle a where
+  ShaderHandle :: Deferred ShaderCreateInfo Shader -> Handle Shader
+  BufferHandle :: Deferred BufferCreateInfo Buffer -> Handle Buffer
 
 shader
   :: Renderer
   -> Vk.ShaderStageFlagBits
-  -> ByteString
-  -> Acquire ByteString
-  -> IO (Handle ShaderCreateInfo)
+  -> BS.ByteString
+  -> Acquire BSL.ByteString
+  -> IO (Handle Shader)
 shader r stage entry code = do
-  STM.atomically $ addItem r.shaders $ ShaderCreateInfo stage entry code
+  ShaderHandle <$> defer (ShaderCreateInfo stage entry code)
 
 loadShader
   :: (MonadResource m, MonadUnliftIO m)
   => VkContext
-  -> Renderer
-  -> Handle ShaderCreateInfo
-  -> m ShaderCreated
-loadShader ctx r h = do
-  createInfo <-
-    liftIO $ STM.atomically $ getItem r.shaders h
-  shaderModule <- with createInfo.dat $ \shaderCode -> do
-    fmap snd $ allocateAcquire $
-      withVkShaderModule (vkDevice ctx) $
-        Vk.ShaderModuleCreateInfo () Vk.zero shaderCode
-  pure $
-    ShaderCreated
-      $ Vk.PipelineShaderStageCreateInfo
-         ()
-         Vk.zero
-         createInfo.shaderStage
-         shaderModule
-         createInfo.entryFn
-         Nothing
+  -> Handle Shader
+  -> m Shader
+loadShader ctx (ShaderHandle h) = do
+  evalM h $ \createInfo -> do
+    shaderModule <- with createInfo.dat $ \shaderCode -> do
+      fmap snd $ allocateAcquire $
+        withVkShaderModule (vkDevice ctx) $
+          Vk.ShaderModuleCreateInfo () Vk.zero (BSL.toStrict shaderCode)
+    pure $
+      Shader
+        $ Vk.PipelineShaderStageCreateInfo
+           ()
+           Vk.zero
+           createInfo.shaderStage
+           shaderModule
+           createInfo.entryFn
+           Nothing
 
 data BufferUsage = BufferVertex | BufferIndex
-data Buffer
 
 vertexBuffer
   :: Renderer
-  -> Acquire (Word64, ByteString)
-  -> IO (Handle BufferCreateInfo)
+  -> Acquire (Word64, BSL.ByteString)
+  -> IO (Handle Buffer)
 vertexBuffer r bufferDat = do
-  STM.atomically $ addItem r.buffers
-    $ BufferCreateInfo Vk.BUFFER_USAGE_VERTEX_BUFFER_BIT bufferDat
+  BufferHandle
+    <$> defer (BufferCreateInfo Vk.BUFFER_USAGE_VERTEX_BUFFER_BIT bufferDat)
 
-loadVertexBuffers
-  :: (MonadResource m, MonadUnliftIO m)
+loadVertexBuffer
+  :: ( MonadUnliftIO m
+     , MonadResource m
+     )
   => VkContext
-  -> Renderer
-  -> [Handle BufferCreateInfo]
-  -> m ()
-loadVertexBuffers ctx r hs = do
-  createInfos <- forM hs $ \h -> liftIO . STM.atomically $ do
-    (h,) <$> getItem r.buffers h
-  let
-    acquires :: [Acquire (Word64, ByteString)]
-    acquires = createInfos <&> (\c -> c.bufferDat)
-    allAcquires :: Acquire [(Word64, ByteString)]
-    allAcquires = sequence acquires
+  -> Handle Buffer
+  -> m Buffer
+loadVertexBuffer ctx (BufferHandle h) =
+  evalM h $ \createInfo -> do
+    with createInfo.dat $ \(sz, bytes) -> do
+      (_relKey, (vkBuf, ptr)) <- allocateAcquire $
+        withBuffer (vkAllocator ctx) sz createInfo.usage
+      liftIO $ pokeArray (castPtr @() @Word8 ptr) (BSL.unpack bytes)
+      -- TODO: Flush later on? Before first use?
+      flush vkBuf
+      -- liftIO . STM.atomically $ setItem r.buffers h vkBuf
+      pure $ Buffer vkBuf
 
-  vkBuf <- with allAcquires $ \allData -> do
-    let totalSize = sum (fst <$> allData)
-    (vkBuf, ptr) <- allocateAcquire $ withBuffer (vkAllocator ctx) totalSize
-    foldM_
-      (\ptr' (sz, bytes) -> liftIO $ do
-        -- Write data to Vulkan buffer
-        pokeArray ptr' (unpack bytes)
-        -- Write buffer and offset back to handle
-        pure $ advancePtr ptr' (fromIntegral sz)
-      )
-      (castPtr @() @Word8 ptr) allData
-    pure vkBuf
+-- loadVertexBuffers
+--   :: ( MonadUnliftIO m
+--      , MonadResource m
+--      )
+--   => VkContext
+--   -> [Handle Buffer]
+--   -> m ()
+-- loadVertexBuffers ctx hs = do
+--   let
+--     xs :: [(Deferred BufferCreateInfo Buffer, BufferCreateInfo)]
+--     xs = fmap (\(BufferHandle h) -> (h, getSeed h)) hs
 
-  pure vkBuf
+--     allAcquires :: Acquire [(Deferred BufferCreateInfo Buffer, (Word64, BSL.ByteString))]
+--     allAcquires = mapM (\(h, createInfo) -> do
+--                            d <- createInfo.bufferDat
+--                            pure (h, d)
+--                        ) xs
+--   with allAcquires $ \allData -> do
+--     let totalSize = sum (fst . snd <$> allData)
+--     (_relKey, (vkBuf, ptr)) <-
+--       allocateAcquire $ withBuffer (vkAllocator ctx) totalSize
+--     foldM_
+--       (\(handles, ptr') (h, (sz, bytes)) -> liftIO $ do
+--         -- Write data to Vulkan buffer
+--         pokeArray ptr' (BSL.unpack bytes)
+--         _ <- eval h $ const (Buffer vkBuf)
+--         -- Write buffer and offset back to handle
+--         pure (h:handles, advancePtr ptr' (fromIntegral sz))
+--       )
+--       ([], castPtr @() @Word8 ptr) allData
+--     flush vkBuf
+
+-- TODO: allocator - withBuffer
+-- TODO: allocator - flush
+-- TODO: hot/cold resources
 
 finallyPresent
   :: MonadIO m
