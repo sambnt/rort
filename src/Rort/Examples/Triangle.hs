@@ -4,7 +4,7 @@
 module Rort.Examples.Triangle where
 
 import Rort.Window (withWindow, getRequiredExtensions, withWindowEvent, closeWindow)
-import Rort.Vulkan.Context (withVkContext, VkSettings (..), VkContext (..))
+import Rort.Vulkan.Context (withVkContext, VkSettings (..), VkContext (..), vkGraphicsQueue, vkPresentationQueue)
 import Control.Monad.Trans.Resource (runResourceT)
 import qualified Data.Vector as Vector
 import qualified Vulkan as Vk

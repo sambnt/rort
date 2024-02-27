@@ -4,7 +4,7 @@
 module Rort.Examples.Uniform where
 
 import Rort.Window (withWindow, getRequiredExtensions, withWindowEvent, closeWindow)
-import Rort.Vulkan.Context (withVkContext, VkSettings (..), VkContext (..), graphicsQueueFamilies)
+import Rort.Vulkan.Context (withVkContext, VkSettings (..), VkContext (..), graphicsQueueFamilies, vkGraphicsQueue, vkPresentationQueue)
 import Control.Monad.Trans.Resource (runResourceT)
 import qualified Data.Vector as Vector
 import qualified Vulkan as Vk

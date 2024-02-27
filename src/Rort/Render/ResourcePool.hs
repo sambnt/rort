@@ -27,7 +27,7 @@ addResource :: ResourcePool a b -> Acquire a -> STM (ResourceHandle a b)
 addResource rs = addItem rs.pool . ToBeAcquired
 
 loadResource
-  :: MonadUnliftIO
+  :: MonadUnliftIO m
   => ResourcePool a b
   -> (a -> m b)
   -> ResourceHandle a b
