@@ -11,6 +11,7 @@ import Rort.Util.Defer (Deferred)
 import qualified Data.ByteString.Lazy as BSL
 import Data.Acquire (Acquire)
 import qualified Data.ByteString as BS
+import Control.Monad.Trans.Resource (ReleaseKey)
 
 data BufferRef = BufferRef { bufRefBuffer :: Vk.Buffer
                            , bufRefOffset :: Word64
@@ -45,7 +46,8 @@ data SubpassInfo
                 , subpassInfoDescriptors      :: [Vk.DescriptorSetLayout]
                 , subpassInfoVertexBindings   :: [Vk.VertexInputBindingDescription]
                 , subpassInfoVertexAttributes :: [Vk.VertexInputAttributeDescription]
-                , subpassRenderPassLayout     :: Handle RenderPass
+                , subpassInfoRenderPassLayout :: Handle RenderPass
+                , subpassInfoIx               :: Word32
                 -- , subpassInfoDraw             :: Draw
                 }
 
@@ -76,9 +78,9 @@ data Buffer
 
 data ShaderInfo
   = ShaderInfo { shaderStage :: Vk.ShaderStageFlagBits
-                     , entryFn     :: BS.ByteString
-                     , dat         :: Acquire BSL.ByteString
-                     }
+               , entryFn     :: BS.ByteString
+               , dat         :: Acquire BSL.ByteString
+               }
 
 data Shader
   = Shader { pipelineShaderStage :: Vk.PipelineShaderStageCreateInfo '[]
@@ -93,7 +95,7 @@ data Draw = Draw { drawSubpass :: Handle Subpass
 
 
 data Handle a where
-  ShaderHandle     :: Deferred ShaderInfo Shader         -> Handle Shader
-  BufferHandle     :: Deferred BufferInfo Buffer         -> Handle Buffer
-  SubpassHandle    :: Deferred SubpassInfo Subpass       -> Handle Subpass
-  RenderPassHandle :: Deferred RenderPassInfo RenderPass -> Handle RenderPass
+  ShaderHandle     :: Deferred ShaderInfo Shader                       -> Handle Shader
+  BufferHandle     :: Deferred BufferInfo Buffer                       -> Handle Buffer
+  SubpassHandle    :: Deferred SubpassInfo (ReleaseKey, Subpass)       -> Handle Subpass
+  RenderPassHandle :: Deferred RenderPassInfo (ReleaseKey, RenderPass) -> Handle RenderPass

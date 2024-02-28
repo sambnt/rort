@@ -93,7 +93,8 @@ main = do
                                       Vk.FORMAT_R32G32B32_SFLOAT
                                       (fromIntegral $ sizeOf (undefined :: Float) * 2)
                                   ]
-                                , subpassRenderPassLayout = renderPass1
+                                , subpassInfoRenderPassLayout = renderPass1
+                                , subpassInfoIx = 0
                                 }
 
       let
