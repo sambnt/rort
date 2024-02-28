@@ -65,6 +65,7 @@ library
                   -- , Rort.Examples.Buffer
                   -- , Rort.Examples.Uniform
                   Rort.Examples.Render
+                  , Rort.Render.FRP
                   , Rort.Util.Defer
                   , Rort.Window
                   , Rort.Window.GLFW
