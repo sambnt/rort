@@ -1,26 +1,95 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE TypeApplications #-}
 
 module Rort.Render where
 
 import Rort.Vulkan.Context ( VkContext, VkContext(..) )
 import Rort.Render.Swapchain (Swapchain, vkSurfaceFormat, vkImageViews, vkExtent, throwSwapchainOutOfDate, throwSwapchainSubOptimal)
-import Rort.Render.Types ( RenderPassInfo, FrameData, DrawCall(PrimitiveDraw, IndexedDraw), Subpass(Subpass), DrawCallPrimitive(..), RenderPass(..), frameRenderPasses, FrameData(FrameData), SubpassInfo(..), Draw(..), DrawCallIndexed(..), BufferRef(..), RenderPassInfo(..) )
+import Rort.Render.Types ( RenderPassInfo, FrameData, DrawCall(PrimitiveDraw, IndexedDraw), Subpass(Subpass), DrawCallPrimitive(..), RenderPass(..), frameRenderPasses, FrameData(FrameData), SubpassInfo(..), Draw(..), DrawCallIndexed(..), BufferRef(..), RenderPassInfo(..), Shader(Shader), Handle (ShaderHandle, BufferHandle), ShaderInfo (..), Buffer(Buffer), BufferInfo (..) )
 import qualified Vulkan as Vk
 import qualified Vulkan.Zero as Vk
 import qualified Data.Vector as Vector
 import qualified Vulkan.Core10.FundamentalTypes as Extent2D (Extent2D(width, height))
-import Rort.Vulkan (withVkRenderPass, withVkGraphicsPipelines, withVkFramebuffer, withVkPipelineLayout)
+import Rort.Vulkan (withVkRenderPass, withVkGraphicsPipelines, withVkFramebuffer, withVkPipelineLayout, withVkShaderModule)
 import qualified Vulkan.Extensions.VK_KHR_surface as VkFormat
 import qualified Vulkan.CStruct.Extends as Vk
 import Data.Bits ((.|.))
 import Control.Monad (forM, forM_, unless)
 import Data.Functor ((<&>), void)
 import Rort.Render.FramesInFlight (FrameSync (..))
-import Data.Word (Word32)
+import Data.Word (Word32, Word64, Word8)
 import Control.Monad.IO.Class (MonadIO (..))
-import Foreign (nullPtr)
-import Data.Acquire (Acquire)
+import Foreign (nullPtr, castPtr, pokeArray)
+import Data.Acquire (Acquire, allocateAcquire, with)
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as BSL
+import Rort.Util.Defer (defer, evalEmpty)
+import Control.Monad.Trans.Resource (MonadResource, MonadUnliftIO)
+import Control.Exception.Safe (MonadMask)
+import Rort.Allocator (withBuffer, withAllocPtr, flush, getAllocBuffer, getAllocOffset)
+
+shader
+   :: MonadIO m
+   => Vk.ShaderStageFlagBits
+   -- Shader stage (vertex, fragment, etc.)
+   -> BS.ByteString
+   -- ^ Shader entry function name
+   -> Acquire BSL.ByteString
+   -- ^ Shader data
+   -> m (Handle Shader)
+shader stage entry code =
+  ShaderHandle <$> defer (ShaderInfo stage entry code)
+
+buffer
+  :: MonadIO m
+  => Vk.BufferUsageFlagBits
+  -- ^ Buffer usage (vertex, index, etc.)
+  -> Acquire (Word64, BSL.ByteString)
+  -- ^ (buffer size, buffer data)
+  -> m (Handle Buffer)
+buffer use bufferDat =
+  BufferHandle <$> defer (BufferInfo use bufferDat)
+
+evalBuffer
+  :: (MonadUnliftIO m, MonadMask m, MonadResource m)
+  => VkContext
+  -> Handle Buffer
+  -> m Buffer
+evalBuffer ctx (BufferHandle d) = do
+  evalEmpty d $ \createInfo ->
+    with createInfo.dat $ \(sz, bytes) -> do
+      (_relKey, alloc) <- allocateAcquire $
+        withBuffer (vkAllocator ctx) createInfo.usage sz
+      withAllocPtr alloc $ \ptr ->
+        liftIO $ pokeArray (castPtr @() @Word8 ptr) (BSL.unpack bytes)
+      _ <- flush alloc
+      pure $ Buffer (getAllocBuffer alloc) (getAllocOffset alloc)
+
+evalShader
+  :: ( MonadUnliftIO m
+     , MonadMask m
+     , MonadResource m
+     )
+  => VkContext -> Handle Shader -> m Shader
+evalShader ctx (ShaderHandle d) = do
+  evalEmpty d $ \createInfo -> do
+    with createInfo.dat $ \shaderCode -> do
+      (_relKey, shaderModule) <- allocateAcquire $
+        withVkShaderModule (vkDevice ctx) $
+          Vk.ShaderModuleCreateInfo () Vk.zero (BSL.toStrict shaderCode)
+
+      pure
+        $ Shader
+        $ Vk.PipelineShaderStageCreateInfo
+            ()
+            Vk.zero
+            createInfo.shaderStage
+            shaderModule
+            createInfo.entryFn
+            Nothing
 
 finallyPresent
   :: MonadIO m
