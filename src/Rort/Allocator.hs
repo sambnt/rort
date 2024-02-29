@@ -13,6 +13,7 @@ import qualified Vulkan.Dynamic as VkDynamic
 import qualified Data.Vector as Vector
 import Foreign.Ptr (Ptr)
 import Data.Acquire (Acquire, mkAcquire)
+import Data.Bits ((.&.))
 
 type Allocator = Vma.Allocator
 
@@ -107,3 +108,96 @@ withUniformBuffer allocator size = do
 
   -- TODO: Handle non-host-visible memory
   pure (buf, allocInfo.mappedData)
+
+type AllocationInfo = (Vk.Buffer, Vma.Allocation, Vma.AllocationInfo)
+
+data Allocation = DeviceAllocation AllocationInfo
+                | StagingAllocation AllocationInfo AllocationInfo
+
+withBuffer
+  :: Allocator
+  -> Vk.BufferUsageFlagBits
+  -> Word64
+  -> Acquire Allocation
+withBuffer allocator usage sz = do
+  let
+    allocCreateInfo =
+      Vma.AllocationCreateInfo
+        -- Flags
+        ( Vma.ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
+        .|. Vma.ALLOCATION_CREATE_HOST_ACCESS_ALLOW_TRANSFER_INSTEAD_BIT
+        .|. Vma.ALLOCATION_CREATE_MAPPED_BIT
+        )
+        Vma.MEMORY_USAGE_AUTO
+        Vk.zero -- required flags
+        Vk.zero -- preferred flags
+        Vk.zero -- Accept any memory types that meet the requirements
+        Vk.NULL_HANDLE -- pool to create allocation in
+        nullPtr -- userdata
+        0 -- priority
+
+    bufferCreateInfo =
+      Vk.BufferCreateInfo
+        ()
+        Vk.zero
+        sz
+        usage
+        Vk.SHARING_MODE_EXCLUSIVE -- TODO: gfx/transfer queue
+        Vector.empty -- queue family indices, ignored.
+
+  (buf, alloc, allocInfo) <- mkAcquire
+    (Vma.createBuffer allocator bufferCreateInfo allocCreateInfo)
+    (\(buf, alloc, _allocInfo) -> Vma.destroyBuffer allocator buf alloc)
+
+  memPropFlags
+     <- liftIO $ Vma.getAllocationMemoryProperties allocator alloc
+
+  if memPropFlags .&. Vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT
+      == Vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT
+  then
+    pure $ DeviceAllocation (buf, alloc, allocInfo)
+  else do
+    let
+      stagingBufferCreateInfo =
+          Vk.BufferCreateInfo
+            ()
+            Vk.zero
+            sz
+            Vk.BUFFER_USAGE_TRANSFER_SRC_BIT
+            Vk.SHARING_MODE_EXCLUSIVE
+            Vector.empty
+
+      stagingAllocCreateInfo =
+        Vma.AllocationCreateInfo
+          -- Flags
+          ( Vma.ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
+          .|. Vma.ALLOCATION_CREATE_MAPPED_BIT
+          )
+          Vma.MEMORY_USAGE_AUTO
+          Vk.zero -- required flags
+          Vk.zero -- preferred flags
+          Vk.zero -- Accept any memory types that meet the requirements
+          Vk.NULL_HANDLE -- pool to create allocation in
+          nullPtr -- userdata
+          0 -- priority
+
+    staging <- mkAcquire
+      (Vma.createBuffer allocator stagingBufferCreateInfo stagingAllocCreateInfo)
+      (\(b, bufAlloc, _) -> Vma.destroyBuffer allocator b bufAlloc)
+
+    pure $ StagingAllocation staging (buf, alloc, allocInfo)
+
+withAllocPtr :: Allocation -> (Ptr () -> r) -> r
+withAllocPtr (DeviceAllocation (_buf, _alloc, allocInfo)) f =
+  f allocInfo.mappedData
+withAllocPtr (StagingAllocation (_buf, _alloc, allocInfo) _) f =
+  f allocInfo.mappedData
+
+-- TODO: Finish this
+flush _ = undefined
+
+getAllocBuffer (DeviceAllocation (buf, _alloc, _allocInfo)) = buf
+getAllocBuffer (StagingAllocation _ (buf, _, _)) = buf
+
+-- TODO: Finish this
+getAllocOffset _ = 0
