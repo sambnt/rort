@@ -16,60 +16,61 @@ import Rort.Vulkan (withVkShaderModule, withVkCommandBuffers)
 import qualified Vulkan.Zero as Vk
 import Control.Monad (when)
 import Rort.Window.Types (WindowEvent(..))
-import Rort.Render (recordFrameData, mkFrameData, finallyPresent)
-import Rort.Render.Types (Draw(..), SubpassInfo (..), DrawCallPrimitive (..), DrawCall (PrimitiveDraw), RenderPassInfo (RenderPassInfo))
+import Rort.Render (finallyPresent, createRenderer, shader, renderPassLayout, subpass, submit)
+import Rort.Render.Types (Draw(..), SubpassInfo (..), DrawCallPrimitive (..), DrawCall (PrimitiveDraw))
 import Data.Acquire (with, Acquire, allocateAcquire)
+import qualified Data.ByteString.Lazy as BSL
 
-initExample :: VkContext -> Acquire [RenderPassInfo]
-initExample ctx = do
-  vertShaderCode <- liftIO $ BS.readFile "data/tri.vert.spv"
-  fragShaderCode <- liftIO $ BS.readFile "data/tri.frag.spv"
+-- initExample :: VkContext -> Acquire [RenderPassInfo]
+-- initExample ctx = do
+--   vertShaderCode <- liftIO $ BS.readFile "data/tri.vert.spv"
+--   fragShaderCode <- liftIO $ BS.readFile "data/tri.frag.spv"
 
-  vertShader <-
-    withVkShaderModule (vkDevice ctx)
-      $ Vk.ShaderModuleCreateInfo () Vk.zero vertShaderCode
-  fragShader <-
-    withVkShaderModule (vkDevice ctx)
-      $ Vk.ShaderModuleCreateInfo () Vk.zero fragShaderCode
+--   vertShader <-
+--     withVkShaderModule (vkDevice ctx)
+--       $ Vk.ShaderModuleCreateInfo () Vk.zero vertShaderCode
+--   fragShader <-
+--     withVkShaderModule (vkDevice ctx)
+--       $ Vk.ShaderModuleCreateInfo () Vk.zero fragShaderCode
 
-  let
-    pipelineShaderStages =
-      [ Vk.PipelineShaderStageCreateInfo
-          ()
-          Vk.zero
-          Vk.SHADER_STAGE_VERTEX_BIT
-          vertShader
-          "main"
-          Nothing
-      , Vk.PipelineShaderStageCreateInfo
-          ()
-          Vk.zero
-          Vk.SHADER_STAGE_FRAGMENT_BIT
-          fragShader
-          "main"
-          Nothing
-      ]
+--   let
+--     pipelineShaderStages =
+--       [ Vk.PipelineShaderStageCreateInfo
+--           ()
+--           Vk.zero
+--           Vk.SHADER_STAGE_VERTEX_BIT
+--           vertShader
+--           "main"
+--           Nothing
+--       , Vk.PipelineShaderStageCreateInfo
+--           ()
+--           Vk.zero
+--           Vk.SHADER_STAGE_FRAGMENT_BIT
+--           fragShader
+--           "main"
+--           Nothing
+--       ]
 
-  let
-    subpassInfo =
-      SubpassInfo { subpassInfoShaderStages = pipelineShaderStages
-                  , subpassInfoDescriptors = []
-                  , subpassInfoVertexBindings = []
-                  , subpassInfoVertexAttributes = []
-                  , subpassInfoDraw = Draw
-                      { drawCall = PrimitiveDraw $ DrawCallPrimitive
-                          { drawCallPrimitiveFirstVertex = 0
-                          , drawCallPrimitiveFirstInstance = 0
-                          , drawCallPrimitiveInstanceCount = 1
-                          , drawCallPrimitiveVertexCount = 3
-                          }
-                      , drawVertexBuffers = []
-                      , drawIndexBuffers = []
-                      }
-                  }
-    renderPassInfo = RenderPassInfo [subpassInfo]
+--   let
+--     subpassInfo =
+--       SubpassInfo { subpassInfoShaderStages = pipelineShaderStages
+--                   , subpassInfoDescriptors = []
+--                   , subpassInfoVertexBindings = []
+--                   , subpassInfoVertexAttributes = []
+--                   , subpassInfoDraw = Draw
+--                       { drawCall = PrimitiveDraw $ DrawCallPrimitive
+--                           { drawCallPrimitiveFirstVertex = 0
+--                           , drawCallPrimitiveFirstInstance = 0
+--                           , drawCallPrimitiveInstanceCount = 1
+--                           , drawCallPrimitiveVertexCount = 3
+--                           }
+--                       , drawVertexBuffers = []
+--                       , drawIndexBuffers = []
+--                       }
+--                   }
+--     renderPassInfo = RenderPassInfo [subpassInfo]
 
-  pure [renderPassInfo]
+--   pure [renderPassInfo]
 
 main :: IO ()
 main = do
@@ -98,61 +99,121 @@ main = do
       (_, ctx) <- allocateAcquire $ withVkContext cfg win
 
       let numFramesInFlight = 2
-      framesInFlight <-
-        withFramesInFlight (vkDevice ctx) (vkQueueFamilies ctx) numFramesInFlight
+      r <- createRenderer ctx numFramesInFlight
 
-      framebufferSize <- liftIO $ vkGetFramebufferSize ctx
-      initialSwapchain <-
-        allocateAcquire $ withSwapchain ctx framebufferSize Nothing
+      vertShader <-
+        shader r Vk.SHADER_STAGE_VERTEX_BIT "main"
+          (liftIO $ BSL.readFile "data/tri.vert.spv")
+      fragShader <-
+        shader r Vk.SHADER_STAGE_FRAGMENT_BIT "main"
+          (liftIO $ BSL.readFile "data/tri.frag.spv")
 
-      with (initExample ctx) $ \renderPassInfos -> do
-        retryOnSwapchainOutOfDate ctx initialSwapchain $ \swapchain -> do
-          -- BEGIN swapchain-dependent
-          with (mkFrameData ctx swapchain renderPassInfos) $ \frameDatas -> do
-            -- rendering a frame
+      rpLayout <-
+        renderPassLayout r
+      subpass0 <-
+        subpass r (SubpassInfo { shaderStages     = [vertShader, fragShader]
+                               , descriptors      = []
+                               , vertexBindings   = []
+                               , vertexAttributes = []
+                               , layout           = rpLayout
+                               , subpassIndex     = 0
+                               }
+                  )
+
+
+      let
+        renderStep = do
+          submit ctx r $ do
             let
-              loop = do
-                withNextFrameInFlight (vkDevice ctx) framesInFlight $ \(FrameInFlight fs _descPool cmdPool) -> runResourceT $ do
-                  finallyPresent (vkDevice ctx) (vkGraphicsQueue ctx) (vkPresentationQueue ctx) (vkSwapchain swapchain) fs $ \imageIndex -> do
-                    (_, cmdBuffers) <-
-                      allocateAcquire $ withVkCommandBuffers
-                        (vkDevice ctx)
-                        $ Vk.CommandBufferAllocateInfo
-                            cmdPool
-                            -- Primary = can be submitted to queue for execution, can't be
-                            -- called by other command buffers.
-                            Vk.COMMAND_BUFFER_LEVEL_PRIMARY
-                            1 -- count
+              draw = Draw
+                { drawCall = PrimitiveDraw $ DrawCallPrimitive
+                             { drawCallPrimitiveFirstVertex = 0
+                             , drawCallPrimitiveFirstInstance = 0
+                             , drawCallPrimitiveInstanceCount = 1
+                             , drawCallPrimitiveVertexCount = 3
+                             }
+                , drawVertexBuffers = []
+                , drawIndexBuffers = []
+                , drawSubpass = subpass0
+                }
+            pure [draw]
 
-                    let cmdBuffer = Vector.head cmdBuffers
-                    Vk.beginCommandBuffer cmdBuffer
-                      $ Vk.CommandBufferBeginInfo
-                          ()
-                          Vk.zero
-                          Nothing -- Inheritance info
+        loop = do
+          renderStep
+          shouldContinue <- liftIO $ withWindowEvent win $ \mEv -> do
+            case mEv of
+              Just (WindowError err) -> do
+                putStrLn $ "Error " <> show err
+                closeWindow win
+                pure False
+              Just WindowClose -> do
+                putStrLn "Window closing..."
+                closeWindow win
+                pure False
+              Just (WindowResize x y) -> do
+                putStrLn $ "Window resizing (" <> show x <> ", " <> show y <> ")"
+                pure True
+              Nothing ->
+                pure True
+          when shouldContinue loop
+      loop
 
-                    let
-                      frameData = frameDatas !! fromIntegral imageIndex
+      -- let numFramesInFlight = 2
+      -- framesInFlight <-
+      --   withFramesInFlight (vkDevice ctx) (vkQueueFamilies ctx) numFramesInFlight
 
-                    recordFrameData cmdBuffer swapchain frameData
+      -- framebufferSize <- liftIO $ vkGetFramebufferSize ctx
+      -- initialSwapchain <-
+      --   allocateAcquire $ withSwapchain ctx framebufferSize Nothing
 
-                    Vk.endCommandBuffer cmdBuffer
-                    pure cmdBuffer
+      -- with (initExample ctx) $ \renderPassInfos -> do
+      --   retryOnSwapchainOutOfDate ctx initialSwapchain $ \swapchain -> do
+      --     -- BEGIN swapchain-dependent
+      --     with (mkFrameData ctx swapchain renderPassInfos) $ \frameDatas -> do
+      --       -- rendering a frame
+      --       let
+      --         loop = do
+      --           withNextFrameInFlight (vkDevice ctx) framesInFlight $ \(FrameInFlight fs _descPool cmdPool) -> runResourceT $ do
+      --             finallyPresent (vkDevice ctx) (vkGraphicsQueue ctx) (vkPresentationQueue ctx) (vkSwapchain swapchain) fs $ \imageIndex -> do
+      --               (_, cmdBuffers) <-
+      --                 allocateAcquire $ withVkCommandBuffers
+      --                   (vkDevice ctx)
+      --                   $ Vk.CommandBufferAllocateInfo
+      --                       cmdPool
+      --                       -- Primary = can be submitted to queue for execution, can't be
+      --                       -- called by other command buffers.
+      --                       Vk.COMMAND_BUFFER_LEVEL_PRIMARY
+      --                       1 -- count
 
-                shouldContinue <- liftIO $ withWindowEvent win $ \mEv -> do
-                  case mEv of
-                    Just (WindowError err) -> do
-                      putStrLn $ "Error " <> show err
-                      closeWindow win
-                      pure False
-                    Just WindowClose -> do
-                      putStrLn "Window closing..."
-                      closeWindow win
-                      pure False
-                    Just (WindowResize x y) -> do
-                      putStrLn $ "Window resizing (" <> show x <> ", " <> show y <> ")"
-                      pure True
-                    Nothing ->
-                      pure True
-                when shouldContinue loop
-            loop
+      --               let cmdBuffer = Vector.head cmdBuffers
+      --               Vk.beginCommandBuffer cmdBuffer
+      --                 $ Vk.CommandBufferBeginInfo
+      --                     ()
+      --                     Vk.zero
+      --                     Nothing -- Inheritance info
+
+      --               let
+      --                 frameData = frameDatas !! fromIntegral imageIndex
+
+      --               recordFrameData cmdBuffer swapchain frameData
+
+      --               Vk.endCommandBuffer cmdBuffer
+      --               pure cmdBuffer
+
+      --           shouldContinue <- liftIO $ withWindowEvent win $ \mEv -> do
+      --             case mEv of
+      --               Just (WindowError err) -> do
+      --                 putStrLn $ "Error " <> show err
+      --                 closeWindow win
+      --                 pure False
+      --               Just WindowClose -> do
+      --                 putStrLn "Window closing..."
+      --                 closeWindow win
+      --                 pure False
+      --               Just (WindowResize x y) -> do
+      --                 putStrLn $ "Window resizing (" <> show x <> ", " <> show y <> ")"
+      --                 pure True
+      --               Nothing ->
+      --                 pure True
+      --           when shouldContinue loop
+      --       loop
