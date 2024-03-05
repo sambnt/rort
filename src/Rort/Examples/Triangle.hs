@@ -10,7 +10,7 @@ import qualified Data.Vector as Vector
 import qualified Vulkan as Vk
 import Control.Monad.IO.Class (liftIO)
 import qualified Data.ByteString as BS
-import Rort.Render.Swapchain (withSwapchain, vkSwapchain, retryOnSwapchainOutOfDate)
+import Rort.Render.Swapchain (withSwapchain, vkSwapchain, retryOnSwapchainOutOfDate, SwapchainOutOfDate (SwapchainOutOfDate))
 import Rort.Render.FramesInFlight (withNextFrameInFlight, withFramesInFlight, FrameInFlight (FrameInFlight))
 import Rort.Vulkan (withVkShaderModule, withVkCommandBuffers)
 import qualified Vulkan.Zero as Vk
@@ -20,6 +20,7 @@ import Rort.Render (finallyPresent, createRenderer, shader, renderPassLayout, su
 import Rort.Render.Types (Draw(..), SubpassInfo (..), DrawCallPrimitive (..), DrawCall (PrimitiveDraw))
 import Data.Acquire (with, Acquire, allocateAcquire)
 import qualified Data.ByteString.Lazy as BSL
+import Control.Exception.Safe (try)
 
 -- initExample :: VkContext -> Acquire [RenderPassInfo]
 -- initExample ctx = do
