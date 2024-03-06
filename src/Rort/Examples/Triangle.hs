@@ -4,23 +4,17 @@
 module Rort.Examples.Triangle where
 
 import Rort.Window (withWindow, getRequiredExtensions, withWindowEvent, closeWindow)
-import Rort.Vulkan.Context (withVkContext, VkSettings (..), VkContext (..))
+import Rort.Vulkan.Context (withVkContext, VkSettings (..))
 import Control.Monad.Trans.Resource (runResourceT)
 import qualified Data.Vector as Vector
 import qualified Vulkan as Vk
 import Control.Monad.IO.Class (liftIO)
-import qualified Data.ByteString as BS
-import Rort.Render.Swapchain (withSwapchain, vkSwapchain, retryOnSwapchainOutOfDate, SwapchainOutOfDate (SwapchainOutOfDate))
-import Rort.Render.FramesInFlight (withNextFrameInFlight, withFramesInFlight, FrameInFlight (FrameInFlight))
-import Rort.Vulkan (withVkShaderModule, withVkCommandBuffers)
-import qualified Vulkan.Zero as Vk
 import Control.Monad (when)
 import Rort.Window.Types (WindowEvent(..))
-import Rort.Render (finallyPresent, createRenderer, shader, renderPassLayout, subpass, submit)
+import Rort.Render (createRenderer, shader, renderPassLayout, subpass, submit)
 import Rort.Render.Types (Draw(..), SubpassInfo (..), DrawCallPrimitive (..), DrawCall (PrimitiveDraw))
-import Data.Acquire (with, Acquire, allocateAcquire)
+import Data.Acquire (allocateAcquire)
 import qualified Data.ByteString.Lazy as BSL
-import Control.Exception.Safe (try)
 
 main :: IO ()
 main = do
