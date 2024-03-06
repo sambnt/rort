@@ -62,100 +62,101 @@ createRenderer ctx numFramesInFlight = do
 submit :: (MonadMask m, MonadIO m, MonadResource m, MonadUnliftIO m, MonadFail m) => VkContext -> Renderer -> IO [Draw] -> m ()
 submit ctx r f = do
   result <- try $ Swapchain.withSwapchainImage r.rendererSwapchain $ \(SwapchainImage _ swapchain) -> do
-    [draw] <- liftIO f
-    let
-      subpass@(SubpassHandle h) = drawSubpass draw
-      subpassInfo = getSeed h
-    (RenderPassLayout rp framebuffers) <- evalRenderPassLayout r swapchain subpassInfo.layout
-    (Subpass pipeline _pipelineLayout) <- evalSubpass r swapchain subpass
-    withNextFrameInFlight
-      (vkDevice ctx)
-      (rendererFramesInFlight r)
-      $ \(FrameInFlight fs _descPool cmdPool) -> runResourceT $ do
-        (_, cmdBuffers) <-
-          allocateAcquire $ withVkCommandBuffers
-            (vkDevice ctx)
-            $ Vk.CommandBufferAllocateInfo
-                cmdPool
-                -- Primary = can be submitted to queue for execution, can't be
-                -- called by other command buffers.
-                Vk.COMMAND_BUFFER_LEVEL_PRIMARY
-                1 -- count
-        let cmdBuffer = Vector.head cmdBuffers
-        finallyPresent (vkDevice ctx) (vkGraphicsQueue ctx) (vkPresentationQueue ctx) (vkSwapchain swapchain) fs $ \imageIndex -> do
-          Vk.beginCommandBuffer cmdBuffer
-            $ Vk.CommandBufferBeginInfo
-                ()
-                Vk.zero
-                Nothing -- Inheritance info
-          let framebuffer = framebuffers !! fromIntegral imageIndex
-          let
-            clearValues = Vector.fromList [Vk.Color $ Vk.Float32 0 0 0 0]
-            renderStartPos = Vk.Offset2D 0 0
-            renderExtent = vkExtent swapchain
-            renderPassBeginInfo =
-              Vk.RenderPassBeginInfo
-                ()
-                rp
-                framebuffer
-                (Vk.Rect2D renderStartPos renderExtent)
-                clearValues
+    draws <- liftIO f
+    forM draws $ \draw -> do
+      let
+        subpass@(SubpassHandle h) = drawSubpass draw
+        subpassInfo = getSeed h
+      (RenderPassLayout rp framebuffers) <- evalRenderPassLayout r swapchain subpassInfo.layout
+      (Subpass pipeline _pipelineLayout) <- evalSubpass r swapchain subpass
+      withNextFrameInFlight
+        (vkDevice ctx)
+        (rendererFramesInFlight r)
+        $ \(FrameInFlight fs _descPool cmdPool) -> runResourceT $ do
+          (_, cmdBuffers) <-
+            allocateAcquire $ withVkCommandBuffers
+              (vkDevice ctx)
+              $ Vk.CommandBufferAllocateInfo
+                  cmdPool
+                  -- Primary = can be submitted to queue for execution, can't be
+                  -- called by other command buffers.
+                  Vk.COMMAND_BUFFER_LEVEL_PRIMARY
+                  1 -- count
+          let cmdBuffer = Vector.head cmdBuffers
+          finallyPresent (vkDevice ctx) (vkGraphicsQueue ctx) (vkPresentationQueue ctx) (vkSwapchain swapchain) fs $ \imageIndex -> do
+            Vk.beginCommandBuffer cmdBuffer
+              $ Vk.CommandBufferBeginInfo
+                  ()
+                  Vk.zero
+                  Nothing -- Inheritance info
+            let framebuffer = framebuffers !! fromIntegral imageIndex
+            let
+              clearValues = Vector.fromList [Vk.Color $ Vk.Float32 0 0 0 0]
+              renderStartPos = Vk.Offset2D 0 0
+              renderExtent = vkExtent swapchain
+              renderPassBeginInfo =
+                Vk.RenderPassBeginInfo
+                  ()
+                  rp
+                  framebuffer
+                  (Vk.Rect2D renderStartPos renderExtent)
+                  clearValues
 
-          Vk.cmdBeginRenderPass
-            cmdBuffer renderPassBeginInfo Vk.SUBPASS_CONTENTS_INLINE
+            Vk.cmdBeginRenderPass
+              cmdBuffer renderPassBeginInfo Vk.SUBPASS_CONTENTS_INLINE
 
-          let
-            viewport = Vk.Viewport
-              0 -- startX
-              0 -- startY
-              (fromIntegral $ Extent2D.width renderExtent) -- width
-              (fromIntegral $ Extent2D.height renderExtent) -- height
-              0 -- min depth
-              1 -- max depth
-            scissor = Vk.Rect2D renderStartPos renderExtent
-          Vk.cmdSetViewport
-            cmdBuffer
-            0
-            (Vector.singleton viewport)
-          Vk.cmdSetScissor
-            cmdBuffer
-            0
-            (Vector.singleton scissor)
+            let
+              viewport = Vk.Viewport
+                0 -- startX
+                0 -- startY
+                (fromIntegral $ Extent2D.width renderExtent) -- width
+                (fromIntegral $ Extent2D.height renderExtent) -- height
+                0 -- min depth
+                1 -- max depth
+              scissor = Vk.Rect2D renderStartPos renderExtent
+            Vk.cmdSetViewport
+              cmdBuffer
+              0
+              (Vector.singleton viewport)
+            Vk.cmdSetScissor
+              cmdBuffer
+              0
+              (Vector.singleton scissor)
 
-          Vk.cmdBindPipeline
-            cmdBuffer
-            Vk.PIPELINE_BIND_POINT_GRAPHICS
-            pipeline
+            Vk.cmdBindPipeline
+              cmdBuffer
+              Vk.PIPELINE_BIND_POINT_GRAPHICS
+              pipeline
 
-          -- let
-          --   (vertexBufs, vertexOffsets) =
-          --     unzip
-          --     $ drawVertexBuffers draw
-          --     <&> \(BufferRef vertexBuf offset) -> (vertexBuf, offset)
-          -- unless (null vertexBufs) $
-          --   Vk.cmdBindVertexBuffers
-          --     cmdBuffer
-          --     0 -- first binding
-          --     (Vector.fromList vertexBufs)
-          --     (Vector.fromList vertexOffsets)
-          -- forM_ (drawIndexBuffers draw) $ \(BufferRef indexBuf offset, indexType) -> do
-          --   Vk.cmdBindIndexBuffer
-          --     cmdBuffer
-          --     indexBuf
-          --     offset
-          --     indexType
+            -- let
+            --   (vertexBufs, vertexOffsets) =
+            --     unzip
+            --     $ drawVertexBuffers draw
+            --     <&> \(BufferRef vertexBuf offset) -> (vertexBuf, offset)
+            -- unless (null vertexBufs) $
+            --   Vk.cmdBindVertexBuffers
+            --     cmdBuffer
+            --     0 -- first binding
+            --     (Vector.fromList vertexBufs)
+            --     (Vector.fromList vertexOffsets)
+            -- forM_ (drawIndexBuffers draw) $ \(BufferRef indexBuf offset, indexType) -> do
+            --   Vk.cmdBindIndexBuffer
+            --     cmdBuffer
+            --     indexBuf
+            --     offset
+            --     indexType
 
-          case drawCall draw of
-            (IndexedDraw (DrawCallIndexed indexCount instanceCount firstIndex vertexOffset firstInstance)) ->
-              Vk.cmdDrawIndexed
-                cmdBuffer indexCount instanceCount firstIndex vertexOffset firstInstance
-            (PrimitiveDraw (DrawCallPrimitive firstVertex firstInstance instanceCount vertexCount)) ->
-              Vk.cmdDraw
-                cmdBuffer vertexCount instanceCount firstVertex firstInstance
+            case drawCall draw of
+              (IndexedDraw (DrawCallIndexed indexCount instanceCount firstIndex vertexOffset firstInstance)) ->
+                Vk.cmdDrawIndexed
+                  cmdBuffer indexCount instanceCount firstIndex vertexOffset firstInstance
+              (PrimitiveDraw (DrawCallPrimitive firstVertex firstInstance instanceCount vertexCount)) ->
+                Vk.cmdDraw
+                  cmdBuffer vertexCount instanceCount firstVertex firstInstance
 
-          Vk.cmdEndRenderPass cmdBuffer
-          Vk.endCommandBuffer cmdBuffer
-          pure cmdBuffer
+            Vk.cmdEndRenderPass cmdBuffer
+            Vk.endCommandBuffer cmdBuffer
+            pure cmdBuffer
     -- get next frame in flight
     -- get framebuffer for swapchain image
     -- allocate command buffer
@@ -173,8 +174,8 @@ submit ctx r f = do
           ps' <- restore (mapM (\h -> evalSubpass' r newSwapchain h $> h) ps)
             `onException` liftIO (STM.atomically $ forM_ ps (writeTQueue r.rendererPasses))
           liftIO $ STM.atomically $ forM_ ps' (writeTQueue r.rendererPasses)
-    Right x ->
-      pure x
+    Right _ ->
+      pure ()
 
 shader
    :: MonadIO m
