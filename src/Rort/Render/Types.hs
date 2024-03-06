@@ -14,10 +14,6 @@ import Rort.Util.Defer (Deferred, unsafeGet)
 import Control.Monad.Trans.Resource (ReleaseKey)
 import Control.Monad.IO.Class (MonadIO)
 
-data BufferRef = BufferRef { bufRefBuffer :: Vk.Buffer
-                           , bufRefOffset :: Word64
-                           }
-
 data DrawCallIndexed
   = DrawCallIndexed { drawCallIndexedIndexCount    :: Word32
                     , drawCallIndexedInstanceCount :: Word32
@@ -38,8 +34,8 @@ data DrawCall = IndexedDraw DrawCallIndexed
 
 data Draw
   = Draw { drawCall :: DrawCall
-         , drawVertexBuffers :: [BufferRef]
-         , drawIndexBuffers  :: [(BufferRef, Vk.IndexType)]
+         , drawVertexBuffers :: [Handle Buffer]
+         , drawIndexBuffers  :: [(Handle Buffer, Vk.IndexType)]
          , drawSubpass :: Handle Subpass
          }
 

@@ -8,13 +8,13 @@ module Rort.Render where
 
 import Rort.Vulkan.Context ( VkContext, VkContext(..) )
 import Rort.Render.Swapchain (Swapchain, vkSurfaceFormat, vkImageViews, vkExtent, throwSwapchainOutOfDate, throwSwapchainSubOptimal, withSwapchain, vkSwapchain, SwapchainOutOfDate (..))
-import Rort.Render.Types ( Shader(..), Handle (ShaderHandle, BufferHandle, RenderPassLayoutHandle, SubpassHandle), ShaderInfo (..), Buffer(Buffer), BufferInfo (..), RenderPassLayout(RenderPassLayout), RenderPassLayoutInfo (RenderPassLayoutInfo), Subpass(Subpass), SubpassInfo(..), Draw, DrawCall (..), DrawCallPrimitive (..), DrawCallIndexed (..), drawCall, unsafeGetHandle, drawSubpass)
+import Rort.Render.Types ( Shader(..), Handle (ShaderHandle, BufferHandle, RenderPassLayoutHandle, SubpassHandle), ShaderInfo (..), Buffer(Buffer), BufferInfo (..), RenderPassLayout(RenderPassLayout), RenderPassLayoutInfo (RenderPassLayoutInfo), Subpass(Subpass), SubpassInfo(..), Draw, DrawCall (..), DrawCallPrimitive (..), DrawCallIndexed (..), drawCall, unsafeGetHandle, drawSubpass, drawVertexBuffers, drawIndexBuffers)
 import qualified Vulkan as Vk
 import qualified Vulkan.Zero as Vk
 import qualified Data.Vector as Vector
 import Rort.Vulkan (withVkShaderModule, withVkRenderPass, withVkFramebuffer, withVkPipelineLayout, withVkGraphicsPipelines, withVkCommandBuffers)
 import qualified Vulkan.CStruct.Extends as Vk
-import Data.Functor (void, ($>))
+import Data.Functor (void, ($>), (<&>))
 import Rort.Render.FramesInFlight (FrameSync (..), FramesInFlight, withFramesInFlight, NumFramesInFlight, FrameInFlight (FrameInFlight), withNextFrameInFlight)
 import Data.Word (Word32, Word64, Word8)
 import Control.Monad.IO.Class (MonadIO (..))
@@ -22,7 +22,7 @@ import Foreign (nullPtr, castPtr, pokeArray)
 import Data.Acquire (Acquire, allocateAcquire, with)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
-import Rort.Util.Defer (defer, evalEmpty, getSeed, eval)
+import Rort.Util.Defer (defer, evalEmpty, getSeed, eval, unsafeGet)
 import Control.Monad.Trans.Resource (MonadResource, MonadUnliftIO, ReleaseKey, runResourceT, release)
 import Control.Exception.Safe (MonadMask, try, mask, onException)
 import Rort.Allocator (withBuffer, withAllocPtr, flush, getAllocBuffer, getAllocOffset)
@@ -30,10 +30,11 @@ import Control.Concurrent.STM (TMVar, TQueue, newTMVarIO, newTQueueIO, writeTQue
 import qualified Control.Concurrent.STM as STM
 import qualified Vulkan.Core10.FundamentalTypes as Extent2D (Extent2D(width, height))
 import qualified Vulkan.Extensions.VK_KHR_surface as VkFormat
-import Control.Monad (forM, forM_)
+import Control.Monad (forM, forM_, unless)
 import Data.Bits ((.|.))
 import Rort.Render.SwapchainData (SwapchainData, SwapchainImage (..))
 import qualified Rort.Render.SwapchainData as Swapchain
+import Data.Function ((&))
 
 data Renderer
   = Renderer { rendererSwapchain      :: SwapchainData
@@ -69,6 +70,8 @@ submit ctx r f = do
         subpassInfo = getSeed h
       (RenderPassLayout rp framebuffers) <- evalRenderPassLayout r swapchain subpassInfo.layout
       (Subpass pipeline _pipelineLayout) <- evalSubpass r swapchain subpass
+      let buffers = drawVertexBuffers draw <> fmap fst (drawIndexBuffers draw)
+      mapM_ (evalBuffer ctx) buffers
       withNextFrameInFlight
         (vkDevice ctx)
         (rendererFramesInFlight r)
@@ -128,23 +131,24 @@ submit ctx r f = do
               Vk.PIPELINE_BIND_POINT_GRAPHICS
               pipeline
 
-            -- let
-            --   (vertexBufs, vertexOffsets) =
-            --     unzip
-            --     $ drawVertexBuffers draw
-            --     <&> \(BufferRef vertexBuf offset) -> (vertexBuf, offset)
-            -- unless (null vertexBufs) $
-            --   Vk.cmdBindVertexBuffers
-            --     cmdBuffer
-            --     0 -- first binding
-            --     (Vector.fromList vertexBufs)
-            --     (Vector.fromList vertexOffsets)
-            -- forM_ (drawIndexBuffers draw) $ \(BufferRef indexBuf offset, indexType) -> do
-            --   Vk.cmdBindIndexBuffer
-            --     cmdBuffer
-            --     indexBuf
-            --     offset
-            --     indexType
+            (vertexBufs, vertexOffsets)
+              <- drawVertexBuffers draw
+                 & mapM (\(BufferHandle d) -> unsafeGet d)
+                 <&> unzip . fmap (\(Buffer buf off) -> (buf, off))
+
+            unless (null vertexBufs) $
+              Vk.cmdBindVertexBuffers
+                cmdBuffer
+                0 -- first binding
+                (Vector.fromList vertexBufs)
+                (Vector.fromList vertexOffsets)
+            forM_ (drawIndexBuffers draw) $ \(BufferHandle d, indexType) -> do
+              (Buffer indexBuf offset) <- unsafeGet d
+              Vk.cmdBindIndexBuffer
+                cmdBuffer
+                indexBuf
+                offset
+                indexType
 
             case drawCall draw of
               (IndexedDraw (DrawCallIndexed indexCount instanceCount firstIndex vertexOffset firstInstance)) ->
