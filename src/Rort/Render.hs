@@ -163,19 +163,18 @@ submit ctx r f = do
   case result of
     Left SwapchainOutOfDate ->
       Swapchain.recreateSwapchain ctx r.rendererSwapchain $ \newSwapchain -> do
-        liftIO $ putStrLn "Making new resources"
         mask $ \restore -> do
           rps <- liftIO $ STM.atomically $ flushTQueue r.rendererLayouts
           rps' <- restore (mapM (\h -> evalRenderPassLayout' r newSwapchain h $> h) rps)
-            `onException` (liftIO $ STM.atomically $ forM_ rps (writeTQueue r.rendererLayouts))
+            `onException` liftIO (STM.atomically $ forM_ rps (writeTQueue r.rendererLayouts))
           liftIO $ STM.atomically $ forM_ rps' (writeTQueue r.rendererLayouts)
         mask $ \restore -> do
-          rps <- liftIO $ STM.atomically $ flushTQueue r.rendererPasses
-          rps' <- restore (mapM (\h -> evalSubpass' r newSwapchain h $> h) rps)
-            `onException` (liftIO $ STM.atomically $ forM_ rps (writeTQueue r.rendererPasses))
-          liftIO $ STM.atomically $ forM_ rps' (writeTQueue r.rendererPasses)
-    Right r ->
-      pure r
+          ps <- liftIO $ STM.atomically $ flushTQueue r.rendererPasses
+          ps' <- restore (mapM (\h -> evalSubpass' r newSwapchain h $> h) ps)
+            `onException` liftIO (STM.atomically $ forM_ ps (writeTQueue r.rendererPasses))
+          liftIO $ STM.atomically $ forM_ ps' (writeTQueue r.rendererPasses)
+    Right x ->
+      pure x
 
 shader
    :: MonadIO m
