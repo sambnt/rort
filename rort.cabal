@@ -70,6 +70,7 @@ library
                   , Rort.Render.Types
                   , Rort.Util.Defer
                   , Rort.Render.Swapchain
+                  , Rort.Render.SwapchainImages
                   , Rort.Render.FramesInFlight
                   , Rort.Render
 
