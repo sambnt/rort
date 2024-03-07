@@ -4,7 +4,7 @@
   inputs = {
     nixpkgs.follows = "haskellNix/nixpkgs-2311";
     haskellNix = {
-      url = "github:input-output-hk/haskell.nix/5dd416e8a3e60844aaae62755b8625d1d6bb898c";
+      url = "github:input-output-hk/haskell.nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     iohkNix = {

@@ -36,6 +36,8 @@ haskell-nix.cabalProject' [
             vulkan-tools
             vulkan-loader
             spirv-tools
+            # TODO: Temporary fix until haskell.nix updates it's nixpkgs-2311:
+            # We're just using the system-installed validation layers atm.
             # vulkan-validation-layers
             shaderc
           ] ++ lib.filter (drv: lib.isDerivation drv) (lib.attrValues haskell-build-tools);

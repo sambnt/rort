@@ -32,8 +32,8 @@ main = do
         cfg = VkSettings { requiredExtensions =
                              windowExts <> Vector.fromList []
                          , requiredValidationLayers =
-                             -- Vector.fromList [ "VK_LAYER_KHRONOS_validation" ]
-                             Vector.fromList [ "VK_LAYER_RENDERDOC_Capture" ]
+                             Vector.fromList [ "VK_LAYER_KHRONOS_validation" ]
+                             -- Vector.fromList [ "VK_LAYER_RENDERDOC_Capture" ]
                          , applicationInfo =
                              Vk.ApplicationInfo
                                (Just "Example: Buffer")  -- application name
