@@ -1,6 +1,7 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE RankNTypes #-}
 
 module Rort.Render.Types where
 
@@ -13,10 +14,7 @@ import Data.Acquire (Acquire)
 import Rort.Util.Defer (Deferred, unsafeGet)
 import Control.Monad.Trans.Resource (ReleaseKey)
 import Control.Monad.IO.Class (MonadIO)
-
-data BufferRef = BufferRef { bufRefBuffer :: Vk.Buffer
-                           , bufRefOffset :: Word64
-                           }
+import Foreign (Storable)
 
 data DrawCallIndexed
   = DrawCallIndexed { drawCallIndexedIndexCount    :: Word32
@@ -38,8 +36,8 @@ data DrawCall = IndexedDraw DrawCallIndexed
 
 data Draw
   = Draw { drawCall          :: DrawCall
-         , drawVertexBuffers :: [BufferRef]
-         , drawIndexBuffers  :: [(BufferRef, Vk.IndexType)]
+         , drawVertexBuffers :: [Handle Buffer]
+         , drawIndexBuffers  :: [(Handle Buffer, Vk.IndexType)]
          , drawSubpass       :: Handle Subpass
          }
 
@@ -75,9 +73,9 @@ data Shader
   = Shader { pipelineShaderStage :: Vk.PipelineShaderStageCreateInfo '[]
            }
 
-data BufferInfo
+data BufferInfo a
   = BufferInfo { usage :: Vk.BufferUsageFlagBits
-               , dat   :: Acquire (Word64, BSL.ByteString)
+               , dat   :: Acquire (Word64, [a])
                }
 
 data Buffer
@@ -87,7 +85,9 @@ data Buffer
 
 data Handle a where
   ShaderHandle :: Deferred ShaderInfo Shader -> Handle Shader
-  BufferHandle :: Deferred BufferInfo Buffer -> Handle Buffer
+  BufferHandle
+    :: forall x. Storable x
+    => Deferred (BufferInfo x) Buffer -> Handle Buffer
   RenderPassLayoutHandle
     :: Deferred RenderPassLayoutInfo (ReleaseKey, RenderPassLayout)
     -> Handle RenderPassLayout

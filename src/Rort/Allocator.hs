@@ -1,4 +1,6 @@
 {-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE DataKinds #-}
 
 module Rort.Allocator where
 
@@ -194,10 +196,21 @@ withAllocPtr (StagingAllocation (_buf, _alloc, allocInfo) _) f =
   f allocInfo.mappedData
 
 -- TODO: Finish this
-flush _ = undefined
+flush
+  :: MonadIO m
+  => Vma.Allocator
+  -> Allocation
+  -> ("offset" Vk.::: Vk.DeviceSize)
+  -> Vk.DeviceSize -> m ()
+flush allocator (DeviceAllocation (_buf, alloc, _allocInfo)) =
+  Vma.flushAllocation allocator alloc
+flush allocator (StagingAllocation (_buf, alloc, _allocInfo) _) =
+  Vma.flushAllocation allocator alloc
 
+getAllocBuffer :: Allocation -> Vk.Buffer
 getAllocBuffer (DeviceAllocation (buf, _alloc, _allocInfo)) = buf
 getAllocBuffer (StagingAllocation _ (buf, _, _)) = buf
 
 -- TODO: Finish this
+getAllocOffset :: Allocation -> Word64
 getAllocOffset _ = 0

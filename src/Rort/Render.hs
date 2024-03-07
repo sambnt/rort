@@ -3,12 +3,13 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Rort.Render where
 
 import Rort.Vulkan.Context ( VkContext, VkContext(..) )
-import Rort.Render.Swapchain (Swapchain, vkSurfaceFormat, vkImageViews, vkExtent, throwSwapchainOutOfDate, throwSwapchainSubOptimal, withSwapchain, vkSwapchain, SwapchainOutOfDate (SwapchainOutOfDate))
-import Rort.Render.Types ( DrawCall(PrimitiveDraw, IndexedDraw), Subpass(Subpass), DrawCallPrimitive(..), SubpassInfo(..), Draw(..), DrawCallIndexed(..), BufferRef(..), Shader(Shader), pipelineShaderStage, Handle (ShaderHandle, BufferHandle, RenderPassLayoutHandle, SubpassHandle), ShaderInfo (..), Buffer(Buffer), BufferInfo (..), RenderPassLayout (RenderPassLayout), RenderPassLayoutInfo (RenderPassLayoutInfo), unsafeGetHandle )
+import Rort.Render.Swapchain (Swapchain, vkSurfaceFormat, vkImageViews, vkExtent, throwSwapchainOutOfDate, throwSwapchainSubOptimal, vkSwapchain, SwapchainOutOfDate (SwapchainOutOfDate))
+import Rort.Render.Types ( DrawCall(PrimitiveDraw, IndexedDraw), Subpass(Subpass), DrawCallPrimitive(..), SubpassInfo(..), Draw(..), DrawCallIndexed(..), Shader(Shader), pipelineShaderStage, Handle (ShaderHandle, BufferHandle, RenderPassLayoutHandle, SubpassHandle), ShaderInfo (..), Buffer(Buffer), BufferInfo (..), RenderPassLayout (RenderPassLayout), RenderPassLayoutInfo (RenderPassLayoutInfo), unsafeGetHandle )
 import qualified Vulkan as Vk
 import qualified Vulkan.Zero as Vk
 import qualified Data.Vector as Vector
@@ -20,20 +21,22 @@ import Data.Bits ((.|.))
 import Control.Monad (forM, forM_, unless)
 import Data.Functor ((<&>), void)
 import Rort.Render.FramesInFlight (FrameSync (..), FramesInFlight, NumFramesInFlight, withFramesInFlight, FrameInFlight (FrameInFlight), withNextFrameInFlight)
-import Data.Word (Word32, Word64, Word8)
+import Data.Word (Word32, Word64)
 import Control.Monad.IO.Class (MonadIO (..))
-import Foreign (nullPtr, castPtr, pokeArray)
+import Foreign (nullPtr, castPtr, pokeArray, Storable)
 import Data.Acquire (Acquire, allocateAcquire, with)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
-import Rort.Util.Defer (defer, evalEmpty, getSeed, eval)
-import Control.Monad.Trans.Resource (MonadResource, MonadUnliftIO, ReleaseKey, runResourceT, release)
+import Rort.Util.Defer (defer, evalEmpty, getSeed, eval, unsafeGet)
+import Control.Monad.Trans.Resource (MonadResource, MonadUnliftIO, runResourceT, release)
 import Control.Exception.Safe (MonadMask, try, finally, mask)
 import Rort.Allocator (withBuffer, withAllocPtr, flush, getAllocBuffer, getAllocOffset)
-import Control.Concurrent.STM (TMVar, TQueue, newTMVarIO, newTQueueIO, writeTQueue)
+import Control.Concurrent.STM (TQueue, newTQueueIO, writeTQueue)
 import qualified Control.Concurrent.STM as STM
 import Rort.Render.SwapchainImages (SwapchainImages, SwapchainImage (SwapchainImage))
 import qualified Rort.Render.SwapchainImages as Swapchain
+import Data.Vector (Vector)
+import Data.Function ((&))
 
 data Renderer
   = Renderer { rendererSwapchain      :: SwapchainImages
@@ -41,7 +44,14 @@ data Renderer
              , rendererLayouts        :: TQueue (Handle RenderPassLayout)
              , rendererPasses         :: TQueue (Handle Subpass)
              , rendererDevice         :: Vk.Device
+             -- , rendererPendingWrites  :: TQueue BufferCopyInfo
              }
+
+data BufferCopyInfo = BufferCopyInfo { srcBuffer    :: Vk.Buffer
+                                     , dstBuffer    :: Vk.Buffer
+                                     , regions      :: Vector Vk.BufferCopy
+                                     , dstStageMask :: Vk.PipelineStageFlagBits2
+                                     }
 
 createRenderer
   :: MonadResource m
@@ -68,7 +78,9 @@ submit ctx r getDraws = do
         s@(SubpassHandle h) = drawSubpass draw
         subpassInfo = getSeed h
       _ <- evalRenderPassLayout (vkDevice ctx) swapchain subpassInfo.layout
-      evalSubpass (vkDevice ctx) swapchain s
+      _ <- evalSubpass (vkDevice ctx) swapchain s
+      let buffers = drawVertexBuffers draw <> fmap fst (drawIndexBuffers draw)
+      mapM_ (evalBuffer ctx) buffers
     withNextFrameInFlight
       (vkDevice ctx)
       (rendererFramesInFlight r)
@@ -136,23 +148,23 @@ submit ctx r getDraws = do
               Vk.PIPELINE_BIND_POINT_GRAPHICS
               pipeline
 
-            -- let
-            --   (vertexBufs, vertexOffsets) =
-            --     unzip
-            --     $ drawVertexBuffers draw
-            --     <&> \(BufferRef vertexBuf offset) -> (vertexBuf, offset)
-            -- unless (null vertexBufs) $
-            --   Vk.cmdBindVertexBuffers
-            --     cmdBuffer
-            --     0 -- first binding
-            --     (Vector.fromList vertexBufs)
-            --     (Vector.fromList vertexOffsets)
-            -- forM_ (drawIndexBuffers draw) $ \(BufferRef indexBuf offset, indexType) -> do
-            --   Vk.cmdBindIndexBuffer
-            --     cmdBuffer
-            --     indexBuf
-            --     offset
-            --     indexType
+            (vertexBufs, vertexOffsets)
+              <- drawVertexBuffers draw
+                 & mapM (\(BufferHandle d) -> unsafeGet d)
+                 <&> unzip . fmap (\(Buffer buf off) -> (buf, off))
+            unless (null vertexBufs) $
+              Vk.cmdBindVertexBuffers
+                cmdBuffer
+                0 -- first binding
+                (Vector.fromList vertexBufs)
+                (Vector.fromList vertexOffsets)
+            forM_ (drawIndexBuffers draw) $ \(BufferHandle d, indexType) -> do
+              (Buffer indexBuf offset) <- unsafeGet d
+              Vk.cmdBindIndexBuffer
+                cmdBuffer
+                indexBuf
+                offset
+                indexType
 
             case drawCall draw of
               (IndexedDraw (DrawCallIndexed indexCount instanceCount firstIndex vertexOffset firstInstance)) ->
@@ -193,11 +205,11 @@ shader _ stage entry code =
   ShaderHandle <$> defer (ShaderInfo stage entry code)
 
 buffer
-  :: MonadIO m
+  :: (MonadIO m, Storable a)
   => Renderer
   -> Vk.BufferUsageFlagBits
   -- ^ Buffer usage (vertex, index, etc.)
-  -> Acquire (Word64, BSL.ByteString)
+  -> Acquire (Word64, [a])
   -- ^ (buffer size, buffer data)
   -> m (Handle Buffer)
 buffer _ use bufferDat =
@@ -469,12 +481,12 @@ evalBuffer
   -> m Buffer
 evalBuffer ctx (BufferHandle d) = do
   evalEmpty d $ \createInfo ->
-    with createInfo.dat $ \(sz, bytes) -> do
+    with createInfo.dat $ \(sz, storable :: [x]) -> do
       (_relKey, alloc) <- allocateAcquire $
         withBuffer (vkAllocator ctx) createInfo.usage sz
       withAllocPtr alloc $ \ptr ->
-        liftIO $ pokeArray (castPtr @() @Word8 ptr) (BSL.unpack bytes)
-      _ <- flush alloc
+        liftIO $ pokeArray (castPtr @() @x ptr) storable
+      _ <- flush (vkAllocator ctx) alloc 0 sz
       pure $ Buffer (getAllocBuffer alloc) (getAllocOffset alloc)
 
 evalShader

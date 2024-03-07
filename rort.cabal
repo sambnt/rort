@@ -23,6 +23,7 @@ library
   build-depends:    base >=4.7 && <5
                   , async
                   , aeson
+                  , binary
                   , megaparsec
                   , safe-exceptions
                   , base64-bytestring
@@ -59,7 +60,7 @@ library
   hs-source-dirs:   src
   default-language: Haskell2010
   exposed-modules:  Rort.Examples.Triangle
-                  --, Rort.Examples.Buffer
+                  , Rort.Examples.Buffer
                   --, Rort.Examples.Uniform
                   , Rort.Window
                   , Rort.Window.GLFW
