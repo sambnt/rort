@@ -36,7 +36,7 @@ haskell-nix.cabalProject' [
             vulkan-tools
             vulkan-loader
             spirv-tools
-            vulkan-validation-layers
+            # vulkan-validation-layers
             shaderc
           ] ++ lib.filter (drv: lib.isDerivation drv) (lib.attrValues haskell-build-tools);
         };

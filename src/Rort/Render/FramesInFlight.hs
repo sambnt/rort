@@ -22,12 +22,14 @@ data FrameSync
               }
 
 data FrameInFlight = FrameInFlight { fifFrameSynce     :: FrameSync
+                                   -- TODO: Move to renderer?
                                    , fifDescriptorPool :: Vk.DescriptorPool
                                    , fifCommandPool    :: Vk.CommandPool
                                    }
 
 data FramesInFlight
   = FramesInFlight { framesInFlightFrameSync      :: TQueue (ReleaseKey, FrameSync)
+                   -- TODO: Move to renderer?
                    , framesInFlightDescriptorPool :: TQueue Vk.DescriptorPool
                    , framesInFlightCommandPool    :: TQueue Vk.CommandPool
                    }

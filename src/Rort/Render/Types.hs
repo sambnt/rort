@@ -10,7 +10,9 @@ import qualified Vulkan as Vk
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
 import Data.Acquire (Acquire)
-import Rort.Util.Defer (Deferred)
+import Rort.Util.Defer (Deferred, unsafeGet)
+import Control.Monad.Trans.Resource (ReleaseKey)
+import Control.Monad.IO.Class (MonadIO)
 
 data BufferRef = BufferRef { bufRefBuffer :: Vk.Buffer
                            , bufRefOffset :: Word64
@@ -35,38 +37,33 @@ data DrawCall = IndexedDraw DrawCallIndexed
               | PrimitiveDraw DrawCallPrimitive
 
 data Draw
-  = Draw { drawCall :: DrawCall
+  = Draw { drawCall          :: DrawCall
          , drawVertexBuffers :: [BufferRef]
          , drawIndexBuffers  :: [(BufferRef, Vk.IndexType)]
+         , drawSubpass       :: Handle Subpass
          }
 
-data SubpassInfo
-  = SubpassInfo { subpassInfoShaderStages     :: [Vk.PipelineShaderStageCreateInfo '[]]
-                , subpassInfoDescriptors      :: [Vk.DescriptorSetLayout]
-                , subpassInfoVertexBindings   :: [Vk.VertexInputBindingDescription]
-                , subpassInfoVertexAttributes :: [Vk.VertexInputAttributeDescription]
-                , subpassInfoDraw             :: Draw
-                }
+data RenderPassLayoutInfo = RenderPassLayoutInfo
 
-data RenderPassInfo
-  = RenderPassInfo { renderPassInfoSubpasses :: [SubpassInfo]
-                   }
+data RenderPassLayout
+  = RenderPassLayout { renderPass :: Vk.RenderPass
+                     , framebuffers :: [Vk.Framebuffer]
+                     }
+
+data SubpassInfo
+  = SubpassInfo { shaderStages     :: [ Handle Shader ]
+                , descriptors      :: [Vk.DescriptorSetLayout]
+                , vertexBindings   :: [Vk.VertexInputBindingDescription]
+                , vertexAttributes :: [Vk.VertexInputAttributeDescription]
+                , layout           :: Handle RenderPassLayout
+                , subpassIndex     :: Word32
+                }
 
 -- output
 data Subpass
-  = Subpass { subpassPipeline :: Vk.Pipeline
+  = Subpass { subpassPipeline       :: Vk.Pipeline
             , subpassPipelineLayout :: Vk.PipelineLayout
-            , subpassDraw     :: Draw
             }
-
-data RenderPass
-  = RenderPass { renderPass :: Vk.RenderPass
-               , renderPassSubpasses :: [Subpass]
-               }
-
-data FrameData
-  = FrameData { frameRenderPasses :: [(Vk.Framebuffer, RenderPass)]
-              }
 
 data ShaderInfo
   = ShaderInfo { shaderStage :: Vk.ShaderStageFlagBits
@@ -91,3 +88,14 @@ data Buffer
 data Handle a where
   ShaderHandle :: Deferred ShaderInfo Shader -> Handle Shader
   BufferHandle :: Deferred BufferInfo Buffer -> Handle Buffer
+  RenderPassLayoutHandle
+    :: Deferred RenderPassLayoutInfo (ReleaseKey, RenderPassLayout)
+    -> Handle RenderPassLayout
+  SubpassHandle
+    :: Deferred SubpassInfo (ReleaseKey, Subpass) -> Handle Subpass
+
+unsafeGetHandle :: MonadIO m => Handle a -> m a
+unsafeGetHandle (ShaderHandle h)           = unsafeGet h
+unsafeGetHandle (BufferHandle h)           = unsafeGet h
+unsafeGetHandle (RenderPassLayoutHandle h) = snd <$> unsafeGet h
+unsafeGetHandle (SubpassHandle h)          = snd <$> unsafeGet h
