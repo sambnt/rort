@@ -214,3 +214,9 @@ getAllocBuffer (StagingAllocation _ (buf, _, _)) = buf
 -- TODO: Finish this
 getAllocOffset :: Allocation -> Word64
 getAllocOffset _ = 0
+
+requiresBufferCopy :: Allocation -> Maybe (Vk.Buffer, Vk.Buffer)
+requiresBufferCopy (DeviceAllocation _) =
+  Nothing
+requiresBufferCopy (StagingAllocation (staging, _, _) (device, _, _)) =
+  Just (staging, device)

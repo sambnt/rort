@@ -17,7 +17,7 @@ import qualified Vulkan.Core10.FundamentalTypes as Extent2D (Extent2D(width, hei
 import Rort.Vulkan (withVkRenderPass, withVkGraphicsPipelines, withVkFramebuffer, withVkPipelineLayout, withVkShaderModule, withVkCommandBuffers)
 import qualified Vulkan.Extensions.VK_KHR_surface as VkFormat
 import qualified Vulkan.CStruct.Extends as Vk
-import Data.Bits ((.|.))
+import Data.Bits ((.|.), (.&.))
 import Control.Monad (forM, forM_, unless)
 import Data.Functor ((<&>), void)
 import Rort.Render.FramesInFlight (FrameSync (..), FramesInFlight, NumFramesInFlight, withFramesInFlight, FrameInFlight (FrameInFlight), withNextFrameInFlight)
@@ -29,8 +29,8 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
 import Rort.Util.Defer (defer, evalEmpty, getSeed, eval, unsafeGet)
 import Control.Monad.Trans.Resource (MonadResource, MonadUnliftIO, runResourceT, release)
-import Control.Exception.Safe (MonadMask, try, finally, mask)
-import Rort.Allocator (withBuffer, withAllocPtr, flush, getAllocBuffer, getAllocOffset)
+import Control.Exception.Safe (MonadMask, try, finally, mask, onException)
+import Rort.Allocator (withBuffer, withAllocPtr, flush, getAllocBuffer, getAllocOffset, requiresBufferCopy)
 import Control.Concurrent.STM (TQueue, newTQueueIO, writeTQueue)
 import qualified Control.Concurrent.STM as STM
 import Rort.Render.SwapchainImages (SwapchainImages, SwapchainImage (SwapchainImage))
@@ -44,7 +44,7 @@ data Renderer
              , rendererLayouts        :: TQueue (Handle RenderPassLayout)
              , rendererPasses         :: TQueue (Handle Subpass)
              , rendererDevice         :: Vk.Device
-             -- , rendererPendingWrites  :: TQueue BufferCopyInfo
+             , rendererPendingWrites  :: TQueue BufferCopyInfo
              }
 
 data BufferCopyInfo = BufferCopyInfo { srcBuffer    :: Vk.Buffer
@@ -52,6 +52,16 @@ data BufferCopyInfo = BufferCopyInfo { srcBuffer    :: Vk.Buffer
                                      , regions      :: Vector Vk.BufferCopy
                                      , dstStageMask :: Vk.PipelineStageFlagBits2
                                      }
+
+recordBufferCopies
+  :: MonadResource m
+  => VkContext
+  -> Vk.CommandPool
+  -> [BufferCopyInfo]
+  -> m ()
+recordBufferCopies ctx cmdPool [] = pure ()
+recordBufferCopies ctx cmdPool bufferCopyInfos = do
+  undefined
 
 createRenderer
   :: MonadResource m
@@ -67,7 +77,16 @@ createRenderer ctx numFramesInFlight = do
   layoutsQue <- liftIO newTQueueIO
   passesQue <- liftIO newTQueueIO
 
-  pure $ Renderer swapchainImgs framesInFlight layoutsQue passesQue (vkDevice ctx)
+  pendingWrites <- liftIO newTQueueIO
+
+  pure $
+    Renderer
+      swapchainImgs
+      framesInFlight
+      layoutsQue
+      passesQue
+      (vkDevice ctx)
+      pendingWrites
 
 submit :: (MonadResource m, MonadMask m, MonadUnliftIO m) => VkContext -> Renderer -> m [Draw] -> m ()
 submit ctx r getDraws = do
@@ -80,11 +99,15 @@ submit ctx r getDraws = do
       _ <- evalRenderPassLayout (vkDevice ctx) swapchain subpassInfo.layout
       _ <- evalSubpass (vkDevice ctx) swapchain s
       let buffers = drawVertexBuffers draw <> fmap fst (drawIndexBuffers draw)
-      mapM_ (evalBuffer ctx) buffers
+      mapM_ (evalBuffer ctx r) buffers
     withNextFrameInFlight
       (vkDevice ctx)
       (rendererFramesInFlight r)
       $ \(FrameInFlight fs _descPool cmdPool) -> runResourceT $ do
+        mask $ \restore -> do
+          bufferCopies <- liftIO $ STM.atomically $ STM.flushTQueue r.rendererPendingWrites
+          restore (recordBufferCopies ctx cmdPool bufferCopies)
+            `onException` liftIO (STM.atomically $ forM_ bufferCopies $ STM.writeTQueue r.rendererPendingWrites)
         (_, cmdBuffers) <-
           allocateAcquire $ withVkCommandBuffers
             (vkDevice ctx)
@@ -477,9 +500,10 @@ acquireSubpass device subpassInfo shaders rp = do
 evalBuffer
   :: (MonadUnliftIO m, MonadMask m, MonadResource m)
   => VkContext
+  -> Renderer
   -> Handle Buffer
   -> m Buffer
-evalBuffer ctx (BufferHandle d) = do
+evalBuffer ctx r (BufferHandle d) = do
   evalEmpty d $ \createInfo ->
     with createInfo.dat $ \(sz, storable :: [x]) -> do
       (_relKey, alloc) <- allocateAcquire $
@@ -487,7 +511,34 @@ evalBuffer ctx (BufferHandle d) = do
       withAllocPtr alloc $ \ptr ->
         liftIO $ pokeArray (castPtr @() @x ptr) storable
       _ <- flush (vkAllocator ctx) alloc 0 sz
+      case requiresBufferCopy alloc of
+        Nothing -> pure ()
+        Just (srcBuf, dstBuf) -> do
+          liftIO $ STM.atomically $ STM.writeTQueue r.rendererPendingWrites $
+            BufferCopyInfo { srcBuffer = srcBuf
+                           , dstBuffer = dstBuf
+                           , regions = Vector.singleton $
+                               Vk.BufferCopy 0 -- src offset
+                                             0 -- dst offset
+                                             sz
+                           , dstStageMask = mkDstStageMask createInfo.usage
+                           }
       pure $ Buffer (getAllocBuffer alloc) (getAllocOffset alloc)
+
+mkDstStageMask :: Vk.BufferUsageFlagBits -> Vk.PipelineStageFlags2
+mkDstStageMask use =
+  let
+    vertexDstStageMask =
+      if use .&. Vk.BUFFER_USAGE_VERTEX_BUFFER_BIT == Vk.BUFFER_USAGE_VERTEX_BUFFER_BIT
+      then (.|. Vk.PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT)
+      else id
+    indexDstStageMask =
+      if use .&. Vk.BUFFER_USAGE_INDEX_BUFFER_BIT == Vk.BUFFER_USAGE_INDEX_BUFFER_BIT
+      then (.|. Vk.PIPELINE_STAGE_2_INDEX_INPUT_BIT)
+      else id
+  in
+    indexDstStageMask . vertexDstStageMask $ Vk.PIPELINE_STAGE_2_NONE
+
 
 evalShader
   :: ( MonadUnliftIO m
