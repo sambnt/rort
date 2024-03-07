@@ -3,10 +3,11 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Rort.Render where
 
-import Rort.Vulkan.Context ( VkContext, VkContext(..) )
+import Rort.Vulkan.Context ( VkContext, VkContext(..), vkTransferQueueIx, vkGraphicsQueueIx, vkGraphicsQueue, vkPresentationQueue, vkTransferQueue )
 import Rort.Render.Swapchain (Swapchain, vkSurfaceFormat, vkImageViews, vkExtent, throwSwapchainOutOfDate, throwSwapchainSubOptimal, withSwapchain, vkSwapchain, SwapchainOutOfDate (..))
 import Rort.Render.Types ( Shader(..), Handle (ShaderHandle, BufferHandle, RenderPassLayoutHandle, SubpassHandle), ShaderInfo (..), Buffer(Buffer), BufferInfo (..), RenderPassLayout(RenderPassLayout), RenderPassLayoutInfo (RenderPassLayoutInfo), Subpass(Subpass), SubpassInfo(..), Draw, DrawCall (..), DrawCallPrimitive (..), DrawCallIndexed (..), drawCall, unsafeGetHandle, drawSubpass, drawVertexBuffers, drawIndexBuffers)
 import qualified Vulkan as Vk
@@ -18,23 +19,24 @@ import Data.Functor (void, ($>), (<&>))
 import Rort.Render.FramesInFlight (FrameSync (..), FramesInFlight, withFramesInFlight, NumFramesInFlight, FrameInFlight (FrameInFlight), withNextFrameInFlight)
 import Data.Word (Word32, Word64, Word8)
 import Control.Monad.IO.Class (MonadIO (..))
-import Foreign (nullPtr, castPtr, pokeArray)
+import Foreign (nullPtr, castPtr, pokeArray, poke, Storable)
 import Data.Acquire (Acquire, allocateAcquire, with)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
 import Rort.Util.Defer (defer, evalEmpty, getSeed, eval, unsafeGet)
 import Control.Monad.Trans.Resource (MonadResource, MonadUnliftIO, ReleaseKey, runResourceT, release)
-import Control.Exception.Safe (MonadMask, try, mask, onException)
-import Rort.Allocator (withBuffer, withAllocPtr, flush, getAllocBuffer, getAllocOffset)
+import Control.Exception.Safe (MonadMask, try, mask, onException, mask_)
+import Rort.Allocator (withBuffer, withAllocPtr, flush, getAllocBuffer, getAllocOffset, requiresBufferCopy)
 import Control.Concurrent.STM (TMVar, TQueue, newTMVarIO, newTQueueIO, writeTQueue, flushTQueue)
 import qualified Control.Concurrent.STM as STM
 import qualified Vulkan.Core10.FundamentalTypes as Extent2D (Extent2D(width, height))
 import qualified Vulkan.Extensions.VK_KHR_surface as VkFormat
-import Control.Monad (forM, forM_, unless)
+import Control.Monad (forM, forM_, unless, when)
 import Data.Bits ((.|.))
 import Rort.Render.SwapchainData (SwapchainData, SwapchainImage (..))
 import qualified Rort.Render.SwapchainData as Swapchain
 import Data.Function ((&))
+import Data.Vector (Vector)
 
 data Renderer
   = Renderer { rendererSwapchain      :: SwapchainData
@@ -42,7 +44,98 @@ data Renderer
              , rendererLayouts        :: TQueue (Handle RenderPassLayout)
              , rendererPasses         :: TQueue (Handle Subpass)
              , rendererDevice         :: Vk.Device
+             , rendererPendingWrites  :: TQueue BufferCopyInfo
              }
+
+data BufferCopyInfo = BufferCopyInfo { src          :: Vk.Buffer
+                                     , dst          :: Vk.Buffer
+                                     , regions      :: Vector Vk.BufferCopy
+                                     , dstStageMask :: Vk.PipelineStageFlagBits2
+                                     }
+  deriving (Eq, Show)
+
+recordBufferCopies
+  :: MonadResource m
+  => VkContext
+  -> Vk.CommandPool
+  -> [BufferCopyInfo]
+  -> m ()
+recordBufferCopies ctx cmdPool [] = pure ()
+recordBufferCopies ctx cmdPool bufferCopyInfos = do
+  (_, cmdBuffers) <-
+    allocateAcquire $ withVkCommandBuffers
+      (vkDevice ctx)
+      $ Vk.CommandBufferAllocateInfo
+          cmdPool
+          -- Primary = can be submitted to queue for execution, can't be
+          -- called by other command buffers.
+          Vk.COMMAND_BUFFER_LEVEL_PRIMARY
+          1 -- count
+  let cmdBuffer = Vector.head cmdBuffers
+  forM bufferCopyInfos $ \copy -> do
+    Vk.cmdCopyBuffer cmdBuffer copy.src copy.dst copy.regions
+  let combinedDstStageMask = foldl (.|.) Vk.zero (dstStageMask <$> bufferCopyInfos)
+
+  if vkGraphicsQueue ctx == vkTransferQueue ctx
+  then do
+    let
+      memoryBarrier = Vk.MemoryBarrier2
+        Vk.PIPELINE_STAGE_2_TRANSFER_BIT_KHR -- src stage mask
+        Vk.ACCESS_2_MEMORY_WRITE_BIT_KHR -- src access mask
+        combinedDstStageMask -- dst stage mask, TODO: Finer grained barrier based on type of allocation
+        Vk.ACCESS_2_MEMORY_READ_BIT_KHR -- dst access mask
+
+      dependencyInfo = Vk.DependencyInfo
+        Vk.zero -- dependency flags
+        (Vector.singleton memoryBarrier) -- memory barriers
+        Vector.empty -- buffer memory barriers
+        Vector.empty -- image memory barriers
+
+    Vk.cmdPipelineBarrier2KHR cmdBuffer dependencyInfo
+
+    Vk.endCommandBuffer cmdBuffer
+
+    let
+      submitInfo = Vk.SubmitInfo
+        () -- next
+        Vector.empty -- wait semaphores
+        Vector.empty -- wait dst stage mask
+        (Vector.singleton $ Vk.commandBufferHandle cmdBuffer)
+        Vector.empty -- signal semaphores
+
+    Vk.queueSubmit (vkGraphicsQueue ctx) (Vector.singleton $ Vk.SomeStruct submitInfo) Vk.NULL_HANDLE
+  else do
+    -- let
+    --   bufferMemoryBarrier = Vk.BufferMemoryBarrier2
+    --     Vk.PIPELINE_STAGE_2_TRANSFER_BIT_KHR -- src stage mask
+    --     Vk.ACCESS_2_MEMORY_WRITE_BIT_KHR -- src access mask
+    --     Vk.zero -- dst stage mask
+    --     Vk.zero -- dst access mask
+    --     (vkTransferQueueIx ctx) -- src queue family ix
+    --     (vkGraphicsQueueIx ctx) -- dst queue family ix
+    --     deviceBuf -- buffer
+    --     deviceAllocInfo.offset -- offset
+    --     deviceAllocInfo.size -- size
+
+    --   dependencyInfo = Vk.DependencyInfo
+    --     Vk.zero -- dependency flags
+    --     Vector.empty -- memory barriers
+    --     (Vector.singleton bufferMemoryBarrier) -- buffer memory barriers
+    --     Vector.empty -- image memory barriers
+
+    -- Vk.cmdPipelineBarrier2KHR cmdBuffer dependencyInfo
+
+    -- Vk.endCommandBuffer cmdBuffer
+
+    -- let
+    --   submitInfo = Vk.SubmitInfo
+    --     () -- next
+    --     Vector.empty -- wait semaphores
+    --     Vector.empty -- wait dst stage mask
+    --     (Vector.singleton $ Vk.commandBufferHandle cmdBuffer)
+    --     Vector.empty -- signal semaphores
+    error "unhandled separate transfer and graphics queue"
+
 
 createRenderer
   :: MonadResource m
@@ -58,9 +151,17 @@ createRenderer ctx numFramesInFlight = do
   layoutsQue <- liftIO newTQueueIO
   passesQue <- liftIO newTQueueIO
 
-  pure $ Renderer swapchain framesInFlight layoutsQue passesQue (vkDevice ctx)
+  writesQue <- liftIO newTQueueIO
 
-submit :: (MonadMask m, MonadIO m, MonadResource m, MonadUnliftIO m, MonadFail m) => VkContext -> Renderer -> IO [Draw] -> m ()
+  pure $
+    Renderer swapchain
+             framesInFlight
+             layoutsQue
+             passesQue
+             (vkDevice ctx)
+             writesQue
+
+submit :: (MonadMask m, MonadResource m, MonadUnliftIO m) => VkContext -> Renderer -> IO [Draw] -> m ()
 submit ctx r f = do
   result <- try $ Swapchain.withSwapchainImage r.rendererSwapchain $ \(SwapchainImage _ swapchain) -> do
     draws <- liftIO f
@@ -71,11 +172,15 @@ submit ctx r f = do
       (RenderPassLayout rp framebuffers) <- evalRenderPassLayout r swapchain subpassInfo.layout
       (Subpass pipeline _pipelineLayout) <- evalSubpass r swapchain subpass
       let buffers = drawVertexBuffers draw <> fmap fst (drawIndexBuffers draw)
-      mapM_ (evalBuffer ctx) buffers
+      mapM_ (evalBuffer ctx r) buffers
       withNextFrameInFlight
         (vkDevice ctx)
         (rendererFramesInFlight r)
         $ \(FrameInFlight fs _descPool cmdPool) -> runResourceT $ do
+          mask_ $ do
+            bufferCopies <- liftIO $ STM.atomically $ STM.flushTQueue r.rendererPendingWrites
+            recordBufferCopies ctx cmdPool bufferCopies
+
           (_, cmdBuffers) <-
             allocateAcquire $ withVkCommandBuffers
               (vkDevice ctx)
@@ -136,6 +241,7 @@ submit ctx r f = do
                  & mapM (\(BufferHandle d) -> unsafeGet d)
                  <&> unzip . fmap (\(Buffer buf off) -> (buf, off))
 
+            -- liftIO $ putStrLn $ show (vertexBufs, vertexOffsets)
             unless (null vertexBufs) $
               Vk.cmdBindVertexBuffers
                 cmdBuffer
@@ -144,6 +250,7 @@ submit ctx r f = do
                 (Vector.fromList vertexOffsets)
             forM_ (drawIndexBuffers draw) $ \(BufferHandle d, indexType) -> do
               (Buffer indexBuf offset) <- unsafeGet d
+              -- liftIO $ putStrLn $ show (indexBuf,  offset)
               Vk.cmdBindIndexBuffer
                 cmdBuffer
                 indexBuf
@@ -196,10 +303,11 @@ shader _ stage entry code =
 
 buffer
   :: MonadIO m
+  => Storable x
   => Renderer
   -> Vk.BufferUsageFlagBits
   -- ^ Buffer usage (vertex, index, etc.)
-  -> Acquire (Word64, BSL.ByteString)
+  -> Acquire (Word64, [x])
   -- ^ (buffer size, buffer data)
   -> m (Handle Buffer)
 buffer _ use bufferDat =
@@ -468,16 +576,27 @@ evalRenderPassLayout' r swapchain (RenderPassLayoutHandle d) = do
 evalBuffer
   :: (MonadUnliftIO m, MonadMask m, MonadResource m)
   => VkContext
+  -> Renderer
   -> Handle Buffer
   -> m Buffer
-evalBuffer ctx (BufferHandle d) = do
+evalBuffer ctx r (BufferHandle d) = do
   evalEmpty d $ \createInfo ->
-    with createInfo.dat $ \(sz, bytes) -> do
+    with createInfo.dat $ \(sz, bytes :: [x]) -> do
       (_relKey, alloc) <- allocateAcquire $
         withBuffer (vkAllocator ctx) createInfo.usage sz
-      withAllocPtr alloc $ \ptr ->
-        liftIO $ pokeArray (castPtr @() @Word8 ptr) (BSL.unpack bytes)
-      _ <- flush alloc
+      withAllocPtr alloc $ \ptr -> do
+        liftIO $ putStrLn $ show ptr
+        liftIO $ pokeArray (castPtr @() @x ptr) bytes
+      _ <- flush (vkAllocator ctx) alloc 0 sz
+      case requiresBufferCopy alloc of
+        Nothing -> pure ()
+        Just (srcBuf, dstBuf) -> do
+          liftIO $ STM.atomically $ STM.writeTQueue r.rendererPendingWrites $
+            BufferCopyInfo { src = srcBuf
+                           , dst = dstBuf
+                           , regions = Vector.singleton $ Vk.BufferCopy 0 0 sz
+                           , dstStageMask = Vk.PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT_KHR
+                           }
       pure $ Buffer (getAllocBuffer alloc) (getAllocOffset alloc)
 
 evalShader

@@ -2,7 +2,7 @@
   description = "My Haskell project";
 
   inputs = {
-    nixpkgs.follows = "haskellNix/nixpkgs-unstable";
+    nixpkgs.follows = "haskellNix/nixpkgs-2311";
     haskellNix = {
       url = "github:input-output-hk/haskell.nix";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -41,6 +41,7 @@
 
     in
     {
+      legacyPackages = forAllSystems pkgsFor;
       packages = forAllSystems (system: let
         project = projectFor system;
       in {

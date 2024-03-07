@@ -1,4 +1,6 @@
 {-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE TypeOperators #-}
 
 module Rort.Allocator where
 
@@ -154,9 +156,12 @@ withBuffer allocator usage sz = do
 
   if memPropFlags .&. Vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT
       == Vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT
-  then
+  then do
+    liftIO $ putStrLn "device alloc"
+    liftIO $ putStrLn $ show buf
     pure $ DeviceAllocation (buf, alloc, allocInfo)
   else do
+    liftIO $ putStrLn "staging alloc"
     let
       stagingBufferCreateInfo =
           Vk.BufferCreateInfo
@@ -194,10 +199,27 @@ withAllocPtr (StagingAllocation (_buf, _alloc, allocInfo) _) f =
   f allocInfo.mappedData
 
 -- TODO: Finish this
-flush _ = undefined
+flush
+  :: MonadIO m
+  => Vma.Allocator
+  -> Allocation
+  -> ("offset" Vk.::: Vk.DeviceSize)
+  -> Vk.DeviceSize
+  -> m ()
+flush allocator (DeviceAllocation (_buf, alloc, _allocInfo)) =
+  Vma.flushAllocation allocator alloc
+flush allocator (StagingAllocation (_buf, alloc, _allocInfo) _) =
+  Vma.flushAllocation allocator alloc
 
+getAllocBuffer :: Allocation -> Vk.Buffer
 getAllocBuffer (DeviceAllocation (buf, _alloc, _allocInfo)) = buf
 getAllocBuffer (StagingAllocation _ (buf, _, _)) = buf
 
 -- TODO: Finish this
 getAllocOffset _ = 0
+
+requiresBufferCopy :: Allocation -> Maybe (Vk.Buffer, Vk.Buffer)
+requiresBufferCopy (DeviceAllocation _) =
+  Nothing
+requiresBufferCopy (StagingAllocation (staging, _, _) (device, _, _)) =
+  Just (staging, device)

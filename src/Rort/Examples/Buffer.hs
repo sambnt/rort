@@ -18,6 +18,7 @@ import Data.Acquire (allocateAcquire)
 import qualified Data.ByteString.Lazy as BSL
 import qualified Data.Binary as Binary
 import Rort.Render (shader, createRenderer, buffer, renderPassLayout, subpass, submit)
+import Data.Bits ((.|.))
 
 main :: IO ()
 main = do
@@ -33,7 +34,8 @@ main = do
         cfg = VkSettings { requiredExtensions =
                              windowExts <> Vector.fromList []
                          , requiredValidationLayers =
-                             Vector.fromList [ "VK_LAYER_KHRONOS_validation" ]
+                             -- Vector.fromList [ "VK_LAYER_KHRONOS_validation" ]
+                             Vector.fromList [ "VK_LAYER_RENDERDOC_Capture" ]
                          , applicationInfo =
                              Vk.ApplicationInfo
                                (Just "Example: Buffer")  -- application name
@@ -73,10 +75,10 @@ main = do
 
       vertexBuffer <-
         buffer r Vk.BUFFER_USAGE_VERTEX_BUFFER_BIT
-          $ pure (vertexBufferSize, Binary.encode vertices)
+          $ pure (vertexBufferSize, vertices)
       indexBuffer <-
         buffer r Vk.BUFFER_USAGE_INDEX_BUFFER_BIT
-          $ pure (indexBufferSize, Binary.encode indices)
+          $ pure (indexBufferSize, indices)
 
       rpLayout <-
         renderPassLayout r
