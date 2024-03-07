@@ -1,5 +1,6 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Rort.Vulkan.Context where
 
@@ -26,18 +27,36 @@ import Rort.Allocator (Allocator)
 import qualified Rort.Allocator as Allocator
 import Data.Acquire (Acquire, mkAcquire)
 
-data VkContext = VkContext { vkInstance           :: Vk.Instance
-                           , vkSurface            :: Vk.SurfaceKHR
-                           , vkPhysicalDevice     :: Vk.PhysicalDevice
-                           , vkDevice             :: Vk.Device
-                           , vkQueueFamilies      :: QueueFamilies
-                           , vkMSAASamples        :: Vk.SampleCountFlagBits
-                           , vkGetFramebufferSize :: IO (Int, Int)
-                           , vkPresentationQueue  :: Vk.Queue
-                           , vkGraphicsQueue      :: Vk.Queue
-                           , vkTransferQueue      :: Vk.Queue
-                           , vkAllocator          :: Allocator
+data VkContext = VkContext { vkInstance              :: Vk.Instance
+                           , vkSurface               :: Vk.SurfaceKHR
+                           , vkPhysicalDevice        :: Vk.PhysicalDevice
+                           , vkDevice                :: Vk.Device
+                           , vkQueueFamilies         :: QueueFamilies
+                           , vkMSAASamples           :: Vk.SampleCountFlagBits
+                           , vkGetFramebufferSize    :: IO (Int, Int)
+                           , vkPresentationQueueInfo :: (Word32, Vk.Queue)
+                           , vkGraphicsQueueInfo     :: (Word32, Vk.Queue)
+                           , vkTransferQueueInfo     :: (Word32, Vk.Queue)
+                           , vkAllocator             :: Allocator
                            }
+
+vkGraphicsQueue :: VkContext -> Vk.Queue
+vkGraphicsQueue = snd . vkGraphicsQueueInfo
+
+vkGraphicsQueueIx :: VkContext -> Word32
+vkGraphicsQueueIx = fst . vkGraphicsQueueInfo
+
+vkTransferQueue :: VkContext -> Vk.Queue
+vkTransferQueue = snd . vkTransferQueueInfo
+
+vkTransferQueueIx :: VkContext -> Word32
+vkTransferQueueIx = fst . vkTransferQueueInfo
+
+vkPresentationQueue :: VkContext -> Vk.Queue
+vkPresentationQueue = snd . vkPresentationQueueInfo
+
+vkPresentationQueueIx :: VkContext -> Word32
+vkPresentationQueueIx = fst . vkPresentationQueueInfo
 
 data VkSettings
   = VkSettings { requiredExtensions       :: Vector BSC.ByteString
@@ -85,10 +104,11 @@ withVkContext cfg win = do
 
   case mDevice of
     Nothing -> error "No physical device found that supports graphics operations"
-    Just (physicalDevice, queFamilies) -> do
+    Just (physicalDevice, queFamilies, (syncFeats, ())) -> do
       logicalDevice <-
         withLogicalDevice
           physicalDevice
+          syncFeats
           queFamilies
           deviceExts
 
@@ -101,33 +121,36 @@ withVkContext cfg win = do
       props <- Vk.getPhysicalDeviceProperties physicalDevice
       let samples = getMaxUsableSampleCount props
 
+      let gfxQueIx = NE.head $ graphicsQueueFamilies queFamilies
       gfxQueue <-
         liftIO $ Vk.getDeviceQueue
           logicalDevice
-          (NE.head $ graphicsQueueFamilies queFamilies)
+          gfxQueIx
           0
+      let presentQueIx = NE.head $ presentationQueueFamilies queFamilies
       presentQueue <-
         liftIO $ Vk.getDeviceQueue
           logicalDevice
-          (NE.head $ presentationQueueFamilies queFamilies)
+          presentQueIx
           0
+      let transferQueIx = NE.head $ transferQueueFamilies queFamilies
       transferQueue <-
         liftIO $ Vk.getDeviceQueue
           logicalDevice
-          (NE.head $ presentationQueueFamilies queFamilies)
+          transferQueIx
           0
 
-      pure $ VkContext { vkInstance           = inst
-                       , vkSurface            = surface
-                       , vkPhysicalDevice     = physicalDevice
-                       , vkQueueFamilies      = queFamilies
-                       , vkDevice             = logicalDevice
-                       , vkMSAASamples        = samples
-                       , vkGetFramebufferSize = getFramebufferSize win
-                       , vkPresentationQueue  = presentQueue
-                       , vkGraphicsQueue      = gfxQueue
-                       , vkTransferQueue      = transferQueue
-                       , vkAllocator          = allocator
+      pure $ VkContext { vkInstance              = inst
+                       , vkSurface               = surface
+                       , vkPhysicalDevice        = physicalDevice
+                       , vkQueueFamilies         = queFamilies
+                       , vkDevice                = logicalDevice
+                       , vkMSAASamples           = samples
+                       , vkGetFramebufferSize    = getFramebufferSize win
+                       , vkPresentationQueueInfo = (presentQueIx, presentQueue)
+                       , vkGraphicsQueueInfo     = (gfxQueIx, gfxQueue)
+                       , vkTransferQueueInfo     = (transferQueIx, transferQueue)
+                       , vkAllocator             = allocator
                        }
 withInstance
   :: Vk.InstanceCreateInfo '[]
@@ -139,10 +162,11 @@ withInstance createInfo =
 
 withLogicalDevice
   :: Vk.PhysicalDevice
+  -> Vk.PhysicalDeviceSynchronization2Features
   -> QueueFamilies
   -> Vector BSC.ByteString
   -> Acquire Vk.Device
-withLogicalDevice device queFamilies exts = do
+withLogicalDevice device deviceFeaturesExtra queFamilies exts = do
   let
     queueCreateInfos = flip foldMap (uniqueQueueFamilies queFamilies) $ \qfIx ->
       [ Vk.DeviceQueueCreateInfo
@@ -159,7 +183,7 @@ withLogicalDevice device queFamilies exts = do
     layers = Vector.fromList [ "VK_LAYER_KHRONOS_validation" ]
 
     logicalDeviceCreateInfo = Vk.DeviceCreateInfo
-      ()
+      (deviceFeaturesExtra, ())
       Vk.zero
       (Vector.fromList $ Vk.SomeStruct <$> queueCreateInfos)
       layers
@@ -206,20 +230,20 @@ pickPhysicalDevice
   :: Vk.Instance
   -> Vk.SurfaceKHR
   -> Vector BSC.ByteString
-  -> IO (Maybe (Vk.PhysicalDevice, QueueFamilies))
+  -> IO (Maybe (Vk.PhysicalDevice, QueueFamilies, (Vk.PhysicalDeviceSynchronization2Features, ())))
 pickPhysicalDevice vkInst surface deviceExts = do
   (_, devices) <- Vk.enumeratePhysicalDevices vkInst
   suitableDevices <- fmap Vector.catMaybes $ forM devices $ \dev -> do
     -- Can use these to check if device supports
     props <- Vk.getPhysicalDeviceProperties dev
-    feats <- Vk.getPhysicalDeviceFeatures dev
+    feats <- Vk.getPhysicalDeviceFeatures2 dev
     mqf <- findQueueFamilies surface dev
     case mqf of
       Nothing -> pure Nothing
       Just qf -> do
         suitable <- isDeviceSuitable surface dev props feats deviceExts qf
         if suitable
-        then pure $ Just (dev, qf)
+        then pure $ Just (dev, qf, feats.next)
         else pure Nothing
 
   pure $ pickFirst suitableDevices
@@ -275,7 +299,7 @@ isDeviceSuitable
   :: Vk.SurfaceKHR
   -> Vk.PhysicalDevice
   -> Vk.PhysicalDeviceProperties
-  -> Vk.PhysicalDeviceFeatures
+  -> Vk.PhysicalDeviceFeatures2 '[Vk.PhysicalDeviceSynchronization2Features]
   -> Vector BSC.ByteString
   -> QueueFamilies
   -> IO Bool
@@ -291,7 +315,7 @@ isDeviceSuitable surface device _props feats deviceExts _queueFams = do
       swapChainAdequate =
         not (null $ swapchainSupportFormats swapChainSupport)
         && not (null $ swapchainSupportPresentModes swapChainSupport)
-    pure (swapChainAdequate && Vk.samplerAnisotropy feats)
+    pure (swapChainAdequate && Vk.samplerAnisotropy feats.features)
 
 checkDeviceExts :: Vector BSC.ByteString -> Vk.PhysicalDevice -> IO Bool
 checkDeviceExts requiredExts device = do
