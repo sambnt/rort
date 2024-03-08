@@ -35,10 +35,11 @@ data DrawCall = IndexedDraw DrawCallIndexed
               | PrimitiveDraw DrawCallPrimitive
 
 data Draw
-  = Draw { drawCall          :: DrawCall
-         , drawVertexBuffers :: [Handle Buffer]
-         , drawIndexBuffers  :: [(Handle Buffer, Vk.IndexType)]
-         , drawSubpass       :: Handle Subpass
+  = Draw { drawCall           :: DrawCall
+         , drawVertexBuffers  :: [Handle Buffer]
+         , drawIndexBuffers   :: [(Handle Buffer, Vk.IndexType)]
+         , drawUniformBuffers :: [Buffer]
+         , drawSubpass        :: Handle Subpass
          }
 
 data RenderPassLayoutInfo = RenderPassLayoutInfo
@@ -50,7 +51,7 @@ data RenderPassLayout
 
 data SubpassInfo
   = SubpassInfo { shaderStages     :: [ Handle Shader ]
-                , descriptors      :: [Vk.DescriptorSetLayout]
+                , descriptors      :: [[Vk.DescriptorSetLayoutBinding]]
                 , vertexBindings   :: [Vk.VertexInputBindingDescription]
                 , vertexAttributes :: [Vk.VertexInputAttributeDescription]
                 , layout           :: Handle RenderPassLayout
@@ -61,6 +62,7 @@ data SubpassInfo
 data Subpass
   = Subpass { subpassPipeline       :: Vk.Pipeline
             , subpassPipelineLayout :: Vk.PipelineLayout
+            , subpassSetLayouts     :: [Vk.DescriptorSetLayout]
             }
 
 data ShaderInfo
@@ -81,6 +83,7 @@ data BufferInfo a
 data Buffer
   = Buffer { buffer :: Vk.Buffer
            , offset :: Word64
+           , sz     :: Word64
            }
 
 data Handle a where

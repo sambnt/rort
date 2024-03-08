@@ -109,7 +109,7 @@ main = do
 
       let
         renderStep = do
-          submit ctx r $ do
+          submit ctx r $ \_ -> do
             let
               draw = Draw
                 { drawCall = IndexedDraw $ DrawCallIndexed
@@ -122,6 +122,7 @@ main = do
                 , drawVertexBuffers = [vertexBuffer]
                 , drawIndexBuffers = [(indexBuffer, Vk.INDEX_TYPE_UINT16)]
                 , drawSubpass = subpass0
+                , drawUniformBuffers = []
                 }
             pure [draw]
 

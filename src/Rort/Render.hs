@@ -14,7 +14,7 @@ import qualified Vulkan as Vk
 import qualified Vulkan.Zero as Vk
 import qualified Data.Vector as Vector
 import qualified Vulkan.Core10.FundamentalTypes as Extent2D (Extent2D(width, height))
-import Rort.Vulkan (withVkRenderPass, withVkGraphicsPipelines, withVkFramebuffer, withVkPipelineLayout, withVkShaderModule, withVkCommandBuffers, withSemaphore)
+import Rort.Vulkan (withVkRenderPass, withVkGraphicsPipelines, withVkFramebuffer, withVkPipelineLayout, withVkShaderModule, withVkCommandBuffers, withSemaphore, withVkDescriptorSetLayout)
 import qualified Vulkan.Extensions.VK_KHR_surface as VkFormat
 import qualified Vulkan.CStruct.Extends as Vk
 import Data.Bits ((.|.), (.&.))
@@ -196,10 +196,10 @@ createRenderer ctx numFramesInFlight = do
       (vkDevice ctx)
       pendingWrites
 
-submit :: (MonadResource m, MonadMask m, MonadUnliftIO m) => VkContext -> Renderer -> m [Draw] -> m ()
+submit :: (MonadResource m, MonadMask m, MonadUnliftIO m) => VkContext -> Renderer -> (Swapchain -> m [Draw]) -> m ()
 submit ctx r getDraws = do
   result <- try $ Swapchain.withSwapchainImage r.rendererSwapchain $ \(SwapchainImage _ swapchain) -> do
-    draws <- getDraws
+    draws <- getDraws swapchain
     forM_ draws $ \draw -> do
       let
         s@(SubpassHandle h) = drawSubpass draw
@@ -211,7 +211,7 @@ submit ctx r getDraws = do
     withNextFrameInFlight
       (vkDevice ctx)
       (rendererFramesInFlight r)
-      $ \(FrameInFlight fs _descPool cmdPool) -> runResourceT $ do
+      $ \(FrameInFlight fs descPool cmdPool) -> runResourceT $ do
         (_, cmdBuffers) <-
           allocateAcquire $ withVkCommandBuffers
             (vkDevice ctx)
@@ -239,7 +239,7 @@ submit ctx r getDraws = do
               subpassInfo = getSeed h
             (RenderPassLayout rp framebuffers) <-
               unsafeGetHandle subpassInfo.layout
-            (Subpass pipeline _pipelineLayout) <-
+            (Subpass pipeline pipelineLayout setLayouts) <-
               unsafeGetHandle draw.drawSubpass
             let framebuffer = framebuffers !! fromIntegral imageIndex
             let
@@ -283,7 +283,7 @@ submit ctx r getDraws = do
             (vertexBufs, vertexOffsets)
               <- drawVertexBuffers draw
                  & mapM (\(BufferHandle d) -> unsafeGet d)
-                 <&> unzip . fmap (\(Buffer buf off) -> (buf, off))
+                 <&> unzip . fmap (\(Buffer buf off _sz) -> (buf, off))
             unless (null vertexBufs) $
               Vk.cmdBindVertexBuffers
                 cmdBuffer
@@ -291,12 +291,58 @@ submit ctx r getDraws = do
                 (Vector.fromList vertexBufs)
                 (Vector.fromList vertexOffsets)
             forM_ (drawIndexBuffers draw) $ \(BufferHandle d, indexType) -> do
-              (Buffer indexBuf offset) <- unsafeGet d
+              (Buffer indexBuf offset _sz) <- unsafeGet d
               Vk.cmdBindIndexBuffer
                 cmdBuffer
                 indexBuf
                 offset
                 indexType
+
+
+            sets <-
+              -- Not recommended to free descriptor sets, just reset pool. So
+              -- we don't setup a destructor here.
+              fmap Vector.toList $ Vk.allocateDescriptorSets
+                (vkDevice ctx)
+                $ Vk.DescriptorSetAllocateInfo
+                    ()
+                    descPool
+                    (Vector.fromList setLayouts)
+
+            unless (null sets) $ do
+              writes <- forM (zip sets (drawUniformBuffers draw)) $ \(set, Buffer buf off sz) -> do
+                let
+                  write =
+                    Vk.WriteDescriptorSet
+                      ()
+                      set -- dst set
+                      0 -- dst binding
+                      0 -- dst array element
+                      1 -- descriptor count
+                      Vk.DESCRIPTOR_TYPE_UNIFORM_BUFFER -- type
+                      mempty -- image info
+                      -- buffer info
+                      ( Vector.singleton $
+                          Vk.DescriptorBufferInfo
+                            buf
+                            off -- offset
+                            sz
+                      )
+                      mempty -- texel buffer view
+                pure write
+
+              liftIO $ Vk.updateDescriptorSets (vkDevice ctx)
+                (fmap Vk.SomeStruct . Vector.fromList $ writes)
+                -- copies
+                mempty
+
+              Vk.cmdBindDescriptorSets
+                cmdBuffer
+                Vk.PIPELINE_BIND_POINT_GRAPHICS
+                pipelineLayout
+                0 -- first set
+                (Vector.fromList sets)
+                mempty -- dynamic offsets
 
             case drawCall draw of
               (IndexedDraw (DrawCallIndexed indexCount instanceCount firstIndex vertexOffset firstInstance)) ->
@@ -461,7 +507,8 @@ evalSubpass device swapchain (SubpassHandle d) = do
       evalRenderPassLayout device swapchain subpassInfo.layout
     shaders <-
       mapM (evalShader device) subpassInfo.shaderStages
-    allocateAcquire $ acquireSubpass device subpassInfo shaders rp
+    allocateAcquire $
+      acquireSubpass device subpassInfo shaders rp
   pure pass
 
 evalSubpass'
@@ -483,14 +530,27 @@ evalSubpass' device swapchain (SubpassHandle d) = do
          )
   pure pass
 
-acquireSubpass :: Vk.Device -> SubpassInfo -> [Shader] -> Vk.RenderPass -> Acquire Subpass
+acquireSubpass
+  :: Vk.Device
+  -> SubpassInfo
+  -> [Shader]
+  -> Vk.RenderPass
+  -> Acquire Subpass
 acquireSubpass device subpassInfo shaders rp = do
+  setLayouts <-
+    forM subpassInfo.descriptors $ \set ->
+      withVkDescriptorSetLayout device
+        $ Vk.DescriptorSetLayoutCreateInfo
+            ()
+            Vk.zero
+            (Vector.fromList set)
+
   pipelineLayout <-
     withVkPipelineLayout device
       $ Vk.PipelineLayoutCreateInfo
           Vk.zero
           -- set layouts
-          (Vector.fromList subpassInfo.descriptors)
+          (Vector.fromList setLayouts)
           -- push constant ranges
           Vector.empty
 
@@ -604,7 +664,7 @@ acquireSubpass device subpassInfo shaders rp = do
       device
       Vk.NULL_HANDLE
       (Vector.singleton pipelineCreateInfo)
-  pure $ Subpass pipeline pipelineLayout
+  pure $ Subpass pipeline pipelineLayout setLayouts
 
 evalBuffer
   :: (MonadUnliftIO m, MonadMask m, MonadResource m)
@@ -632,7 +692,7 @@ evalBuffer ctx r (BufferHandle d) = do
                                              sz
                            , dstStageMask = mkDstStageMask createInfo.usage
                            }
-      pure $ Buffer (getAllocBuffer alloc) (getAllocOffset alloc)
+      pure $ Buffer (getAllocBuffer alloc) (getAllocOffset alloc) sz
 
 mkDstStageMask :: Vk.BufferUsageFlagBits -> Vk.PipelineStageFlags2
 mkDstStageMask use =

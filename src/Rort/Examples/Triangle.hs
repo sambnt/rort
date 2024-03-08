@@ -66,7 +66,7 @@ main = do
                   )
       let
         renderStep = do
-          submit ctx r $ do
+          submit ctx r $ \_ -> do
             let
               draw = Draw
                 { drawCall = PrimitiveDraw $ DrawCallPrimitive
@@ -78,6 +78,7 @@ main = do
                 , drawVertexBuffers = []
                 , drawIndexBuffers = []
                 , drawSubpass = subpass0
+                , drawUniformBuffers = []
                 }
             pure [draw]
 
