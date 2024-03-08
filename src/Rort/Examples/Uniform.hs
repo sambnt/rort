@@ -45,7 +45,7 @@ main = do
                                              ]
                          , applicationInfo =
                              Vk.ApplicationInfo
-                               (Just "Example: Buffer")  -- application name
+                               (Just "Example: Uniform")  -- application name
                                (Vk.MAKE_API_VERSION 1 0 0) -- application version
                                (Just "No engine")          -- engine name
                                (Vk.MAKE_API_VERSION 1 0 0) -- engine version
