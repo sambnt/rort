@@ -38,9 +38,12 @@ data Draw
   = Draw { drawCall           :: DrawCall
          , drawVertexBuffers  :: [Handle Buffer]
          , drawIndexBuffers   :: [(Handle Buffer, Vk.IndexType)]
-         , drawUniformBuffers :: [Buffer]
+         , drawDescriptors    :: [[DrawDescriptor]]
          , drawSubpass        :: Handle Subpass
          }
+
+data DrawDescriptor = DescriptorUniform Buffer
+                    | DescriptorTexture (Handle Texture)
 
 data RenderPassLayoutInfo = RenderPassLayoutInfo
 
@@ -86,6 +89,19 @@ data Buffer
            , sz     :: Word64
            }
 
+data TextureInfo a
+  = TextureInfo { format :: Vk.Format
+                , width  :: Word32
+                , height :: Word32
+                , size   :: Word64
+                , dat    :: [a]
+                }
+
+data Texture = Texture { img :: Vk.Image
+                       , imgView :: Vk.ImageView
+                       , sampler :: Vk.Sampler
+                       }
+
 data Handle a where
   ShaderHandle :: Deferred ShaderInfo Shader -> Handle Shader
   BufferHandle
@@ -96,9 +112,14 @@ data Handle a where
     -> Handle RenderPassLayout
   SubpassHandle
     :: Deferred SubpassInfo (ReleaseKey, Subpass) -> Handle Subpass
+  TextureHandle
+    :: forall x. Storable x
+    => Deferred (Acquire (TextureInfo x)) Texture
+    -> Handle Texture
 
 unsafeGetHandle :: MonadIO m => Handle a -> m a
 unsafeGetHandle (ShaderHandle h)           = unsafeGet h
 unsafeGetHandle (BufferHandle h)           = unsafeGet h
 unsafeGetHandle (RenderPassLayoutHandle h) = snd <$> unsafeGet h
 unsafeGetHandle (SubpassHandle h)          = snd <$> unsafeGet h
+unsafeGetHandle (TextureHandle h)          = unsafeGet h

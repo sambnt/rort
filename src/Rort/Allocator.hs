@@ -111,16 +111,17 @@ withUniformBuffer allocator size = do
   -- TODO: Handle non-host-visible memory
   pure (buf, allocInfo.mappedData)
 
-type AllocationInfo = (Vk.Buffer, Vma.Allocation, Vma.AllocationInfo)
+type AllocationInfo a = (a, Vma.Allocation, Vma.AllocationInfo)
 
-data Allocation = DeviceAllocation AllocationInfo
-                | StagingAllocation AllocationInfo AllocationInfo
+data Allocation a
+  = DeviceAllocation (AllocationInfo a)
+  | StagingAllocation (AllocationInfo Vk.Buffer) (AllocationInfo a)
 
 withBuffer
   :: Allocator
   -> Vk.BufferUsageFlagBits
   -> Word64
-  -> Acquire Allocation
+  -> Acquire (Allocation Vk.Buffer)
 withBuffer allocator usage sz = do
   let
     allocCreateInfo =
@@ -189,17 +190,17 @@ withBuffer allocator usage sz = do
 
     pure $ StagingAllocation staging (buf, alloc, allocInfo)
 
-withAllocPtr :: Allocation -> (Ptr () -> r) -> r
-withAllocPtr (DeviceAllocation (_buf, _alloc, allocInfo)) f =
+withAllocPtr :: Allocation a -> (Ptr () -> r) -> r
+withAllocPtr (DeviceAllocation (_, _alloc, allocInfo)) f =
   f allocInfo.mappedData
-withAllocPtr (StagingAllocation (_buf, _alloc, allocInfo) _) f =
+withAllocPtr (StagingAllocation (_, _alloc, allocInfo) _) f =
   f allocInfo.mappedData
 
 -- TODO: Finish this
 flush
   :: MonadIO m
   => Vma.Allocator
-  -> Allocation
+  -> Allocation a
   -> ("offset" Vk.::: Vk.DeviceSize)
   -> Vk.DeviceSize -> m ()
 flush allocator (DeviceAllocation (_buf, alloc, _allocInfo)) =
@@ -207,16 +208,80 @@ flush allocator (DeviceAllocation (_buf, alloc, _allocInfo)) =
 flush allocator (StagingAllocation (_buf, alloc, _allocInfo) _) =
   Vma.flushAllocation allocator alloc
 
-getAllocBuffer :: Allocation -> Vk.Buffer
-getAllocBuffer (DeviceAllocation (buf, _alloc, _allocInfo)) = buf
-getAllocBuffer (StagingAllocation _ (buf, _, _)) = buf
+getAllocData :: Allocation a -> a
+getAllocData (DeviceAllocation (buf, _alloc, _allocInfo)) = buf
+getAllocData (StagingAllocation _ (buf, _, _)) = buf
 
 -- TODO: Finish this
-getAllocOffset :: Allocation -> Word64
+getAllocOffset :: Allocation a -> Word64
 getAllocOffset _ = 0
 
-requiresBufferCopy :: Allocation -> Maybe (Vk.Buffer, Vk.Buffer)
+requiresBufferCopy :: Allocation a -> Maybe (Vk.Buffer, a)
 requiresBufferCopy (DeviceAllocation _) =
   Nothing
 requiresBufferCopy (StagingAllocation (staging, _, _) (device, _, _)) =
   Just (staging, device)
+
+withImage
+  :: Allocator
+  -> Vk.ImageCreateInfo '[]
+  -> Word64
+  -> Acquire (Allocation Vk.Image)
+withImage allocator createInfo imgSize = do
+  let
+    allocCreateInfo =
+      Vma.AllocationCreateInfo
+        -- Flags
+        ( Vma.ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
+        .|. Vma.ALLOCATION_CREATE_HOST_ACCESS_ALLOW_TRANSFER_INSTEAD_BIT
+        .|. Vma.ALLOCATION_CREATE_MAPPED_BIT
+        )
+        Vma.MEMORY_USAGE_AUTO
+        Vk.zero -- required flags
+        Vk.zero -- preferred flags
+        Vk.zero -- Accept any memory types that meet the requirements
+        Vk.NULL_HANDLE -- pool to create allocation in
+        nullPtr -- userdata
+        0 -- priority
+
+  (img, alloc, allocInfo) <- mkAcquire
+    (Vma.createImage allocator createInfo allocCreateInfo)
+    (\(img, alloc, _allocInfo) -> Vma.destroyImage allocator img alloc)
+
+  memPropFlags
+     <- liftIO $ Vma.getAllocationMemoryProperties allocator alloc
+
+  if memPropFlags .&. Vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT
+      == Vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT
+  then
+    pure $ DeviceAllocation (img, alloc, allocInfo)
+  else do
+    let
+      stagingBufferCreateInfo =
+          Vk.BufferCreateInfo
+            ()
+            Vk.zero
+            imgSize
+            Vk.BUFFER_USAGE_TRANSFER_SRC_BIT
+            Vk.SHARING_MODE_EXCLUSIVE
+            Vector.empty
+
+      stagingAllocCreateInfo =
+        Vma.AllocationCreateInfo
+          -- Flags
+          ( Vma.ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
+          .|. Vma.ALLOCATION_CREATE_MAPPED_BIT
+          )
+          Vma.MEMORY_USAGE_AUTO
+          Vk.zero -- required flags
+          Vk.zero -- preferred flags
+          Vk.zero -- Accept any memory types that meet the requirements
+          Vk.NULL_HANDLE -- pool to create allocation in
+          nullPtr -- userdata
+          0 -- priority
+
+    staging <- mkAcquire
+      (Vma.createBuffer allocator stagingBufferCreateInfo stagingAllocCreateInfo)
+      (\(b, bufAlloc, _) -> Vma.destroyBuffer allocator b bufAlloc)
+
+    pure $ StagingAllocation staging (img, alloc, allocInfo)

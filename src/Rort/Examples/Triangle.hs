@@ -78,7 +78,7 @@ main = do
                 , drawVertexBuffers = []
                 , drawIndexBuffers = []
                 , drawSubpass = subpass0
-                , drawUniformBuffers = []
+                , drawDescriptors = []
                 }
             pure [draw]
 
