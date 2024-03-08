@@ -26,6 +26,17 @@ nix develop
 cabal run exe:rort
 ```
 
+## Tips
+https://vulkan.org/user/pages/09.events/vulkanised-2024/vulkanised-2024-charles-giessen-2-lunarg.pdf
+ - Use profiler.
+ - Measure using milliseconds, not FPS.
+ - Add ImGUI.
+ - Use deletion queue to manage cleanup
+ - Probably don't need to use all available VkQueues.
+ - Understand VkPresentModeKHR.
+ - Use Dynamic Rendering extension.
+ - Don't prioritize smooth swapchain resizing (oops).
+
 ## Issues
 
 ### The function pointer for "..." is null
