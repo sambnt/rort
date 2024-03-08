@@ -299,17 +299,17 @@ submit ctx r getDraws = do
                 indexType
 
 
-            sets <-
-              -- Not recommended to free descriptor sets, just reset pool. So
-              -- we don't setup a destructor here.
-              fmap Vector.toList $ Vk.allocateDescriptorSets
-                (vkDevice ctx)
-                $ Vk.DescriptorSetAllocateInfo
-                    ()
-                    descPool
-                    (Vector.fromList setLayouts)
+            unless (null setLayouts) $ do
+              sets <-
+                -- Not recommended to free descriptor sets, just reset pool. So
+                -- we don't setup a destructor here.
+                fmap Vector.toList $ Vk.allocateDescriptorSets
+                  (vkDevice ctx)
+                  $ Vk.DescriptorSetAllocateInfo
+                      ()
+                      descPool
+                      (Vector.fromList setLayouts)
 
-            unless (null sets) $ do
               writes <- forM (zip sets (drawUniformBuffers draw)) $ \(set, Buffer buf off sz) -> do
                 let
                   write =
