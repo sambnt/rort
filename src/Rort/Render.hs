@@ -37,7 +37,6 @@ import Rort.Render.SwapchainImages (SwapchainImages, SwapchainImage (SwapchainIm
 import qualified Rort.Render.SwapchainImages as Swapchain
 import Data.Vector (Vector)
 import Data.Function ((&))
-import Data.Maybe (maybeToList)
 
 data Renderer
   = Renderer { rendererSwapchain      :: SwapchainImages
@@ -61,8 +60,8 @@ recordBufferCopies
   -> Vk.CommandPool
   -> Vk.CommandBuffer
   -> [BufferCopyInfo]
-  -> m (Maybe Vk.Semaphore)
-recordBufferCopies _ctx _cmdPool _cmdBuffer [] = pure Nothing
+  -> m ()
+recordBufferCopies _ctx _cmdPool _cmdBuffer [] = pure ()
 recordBufferCopies ctx cmdPool cmdBuffer bufferCopyInfos = do
   forM_  bufferCopyInfos $ \copy ->
     Vk.cmdCopyBuffer cmdBuffer copy.srcBuffer copy.dstBuffer copy.regions
@@ -86,8 +85,8 @@ recordBufferCopies ctx cmdPool cmdBuffer bufferCopyInfos = do
         Vector.empty -- image memory barriers
 
     Vk.cmdPipelineBarrier2KHR cmdBuffer dependencyInfo
-    pure Nothing
   else do
+    _ <- error "Separate transfer and graphics queue not implemented"
     let
       gfxWaitSemaphoreInfo = Vk.SemaphoreCreateInfo () Vk.zero
 
@@ -151,10 +150,10 @@ recordBufferCopies ctx cmdPool cmdBuffer bufferCopyInfos = do
       barriers2 = flip foldMap bufferCopyInfos $ \copy ->
         flip foldMap copy.regions $ \region ->
           [ Vk.BufferMemoryBarrier2
-              Vk.PIPELINE_STAGE_2_TRANSFER_BIT_KHR -- src stage mask
-              Vk.ACCESS_2_MEMORY_WRITE_BIT_KHR -- src access mask
-              Vk.zero -- dst stage mask
-              Vk.zero -- dst access mask
+              Vk.zero -- src stage mask
+              Vk.zero -- src access mask
+              copy.dstStageMask -- dst stage mask
+              Vk.ACCESS_2_MEMORY_READ_BIT -- dst access mask
               (vkTransferQueueIx ctx) -- src queue family ix
               (vkGraphicsQueueIx ctx) -- dst queue family ix
               copy.dstBuffer -- buffer
@@ -170,7 +169,7 @@ recordBufferCopies ctx cmdPool cmdBuffer bufferCopyInfos = do
         Vector.empty -- image memory barriers
 
     Vk.cmdPipelineBarrier2KHR cmdBuffer dependencyInfo2
-    pure $ Just gfxWaitSemaphore
+    -- pure $ Just (gfxWaitSemaphore, foldl (\acc copy -> acc .|. copy.dstStageMask) Vk.zero bufferCopyInfos)
 
 createRenderer
   :: MonadResource m
@@ -229,7 +228,7 @@ submit ctx r getDraws = do
                 ()
                 Vk.zero
                 Nothing -- Inheritance info
-          mSemaphore <- mask $ \restore -> do
+          mask $ \restore -> do
             bufferCopies <- liftIO $ STM.atomically $ STM.flushTQueue r.rendererPendingWrites
             unless (null bufferCopies) $ liftIO $ print bufferCopies
             restore (recordBufferCopies ctx cmdPool cmdBuffer bufferCopies)
@@ -309,7 +308,7 @@ submit ctx r getDraws = do
 
             Vk.cmdEndRenderPass cmdBuffer
           Vk.endCommandBuffer cmdBuffer
-          pure (cmdBuffer, maybeToList mSemaphore)
+          pure cmdBuffer
   case result of
     Left SwapchainOutOfDate ->
       Swapchain.recreateSwapchain ctx r.rendererSwapchain $ \newSc -> do
@@ -682,7 +681,7 @@ finallyPresent
   -- ^ Present queue
   -> Vk.SwapchainKHR
   -> FrameSync
-  -> (("imageIndex" Vk.::: Word32) -> m (Vk.CommandBuffer, [Vk.Semaphore]))
+  -> (("imageIndex" Vk.::: Word32) -> m Vk.CommandBuffer)
   -> m ()
 finallyPresent device gfxQue presentQue swapchain fs f = do
   void $ Vk.waitForFences
@@ -705,15 +704,15 @@ finallyPresent device gfxQue presentQue swapchain fs f = do
     device
     (Vector.singleton $ fsFenceInFlight fs)
 
-  (cmdBuffer, waitSems) <- f imageIndex
+  cmdBuffer <- f imageIndex
 
   -- TODO: Maybe don't submit command buffer on behalf of user?
   let
     submitInfo =
       Vk.SubmitInfo
         ()
-        (Vector.fromList $ [fsSemaphoreImageAvailable fs] <> waitSems)
-        (Vector.singleton Vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT)
+        (Vector.fromList $ [fsSemaphoreImageAvailable fs])
+        (Vector.fromList $ [Vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT])
         (Vector.singleton $ Vk.commandBufferHandle cmdBuffer)
         (Vector.singleton $ fsSemaphoreRenderFinished fs)
   liftIO $ Vk.queueSubmit
