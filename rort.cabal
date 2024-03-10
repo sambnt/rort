@@ -63,6 +63,7 @@ library
                   , Rort.Examples.Buffer
                   , Rort.Examples.Uniform
                   , Rort.Examples.Texture
+                  , Rort.Examples.Depth
                   , Rort.Window
                   , Rort.Window.GLFW
                   , Rort.Window.Types
