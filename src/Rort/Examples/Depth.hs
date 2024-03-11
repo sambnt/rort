@@ -20,14 +20,16 @@ import qualified Rort.Allocator as Allocator
 import qualified Chronos
 import Control.Lens ((%~))
 import Data.Acquire (allocateAcquire)
-import Rort.Render.Types (SubpassInfo(..), Draw(..), DrawCallIndexed(..), DrawCall (IndexedDraw), Buffer (Buffer), TextureInfo (TextureInfo), DrawDescriptor (..))
-import Rort.Render (createRenderer, shader, buffer, renderPassLayout, subpass, submit, texture, evalTexture)
+import Rort.Render.Types (SubpassInfo(..), Draw(..), DrawCallIndexed(..), DrawCall (IndexedDraw), Buffer (Buffer), TextureInfo (TextureInfo), DrawDescriptor (..), RenderPassInfo (..), useColorAttachment, useDepthAttachment, noUsage, AttachmentFormat (..), DrawRenderPass (..), DrawSubpass (..), Attachment (Attachment))
+import Rort.Render (createRenderer, shader, buffer, renderPass, submit, texture, evalTexture)
 import Control.Monad (when)
 import Foreign (sizeOf, Word8, Word16, pokeArray, castPtr, peekArray)
 import Rort.Window.Types (WindowEvent(..))
 import qualified Data.ByteString.Lazy as BSL
 import qualified Codec.Image.STB as STB
 import Data.Bitmap (withBitmap)
+import qualified Vulkan.Zero as Vk
+import Data.Bits ((.|.))
 
 main :: IO ()
 main = do
@@ -115,10 +117,8 @@ main = do
         buffer r Vk.BUFFER_USAGE_INDEX_BUFFER_BIT
           $ pure (indexBufferSize, indices)
 
-      rpLayout <-
-        renderPassLayout r
-      subpass0 <-
-        subpass r (SubpassInfo { shaderStages     = [vertShader, fragShader]
+      let
+        subpass0 = SubpassInfo { shaderStages     = [ vertShader, fragShader ]
                                , descriptors      = [
                                    [ Vk.DescriptorSetLayoutBinding
                                        0 -- binding in shader
@@ -157,10 +157,40 @@ main = do
                                        Vk.FORMAT_R32G32_SFLOAT
                                        (fromIntegral $ sizeOf (undefined :: Float) * 6)
                                    ]
-                               , layout           = rpLayout
-                               , subpassIndex     = 0
+                               , attachmentUsage  = noUsage
+                                                    & useColorAttachment 0
+                                                    & useDepthAttachment 1
                                }
-                  )
+
+      -- TODO: Don't use handles, just use XInfos themselves
+      rp <-
+        renderPass r $
+          RenderPassInfo { attachments =
+                             [ Attachment
+                                 SwapchainColorFormat
+                                 Vk.ATTACHMENT_LOAD_OP_CLEAR
+                                 Vk.ATTACHMENT_STORE_OP_STORE
+                                 Vk.IMAGE_LAYOUT_UNDEFINED
+                                 Vk.IMAGE_LAYOUT_PRESENT_SRC_KHR
+                             , Attachment
+                                 SwapchainDepthFormat
+                                 Vk.ATTACHMENT_LOAD_OP_CLEAR
+                                 Vk.ATTACHMENT_STORE_OP_DONT_CARE
+                                 Vk.IMAGE_LAYOUT_UNDEFINED
+                                 Vk.IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+                             ]
+                         , subpasses = [ subpass0 ]
+                         , subpassDependencies = [
+                             Vk.SubpassDependency
+                               Vk.SUBPASS_EXTERNAL -- src subpass
+                               0 -- dst subpass
+                               (Vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT .|. Vk.PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT) -- src stage mask
+                               (Vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT .|. Vk.PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT) -- dst stage mask
+                               Vk.zero -- src access mask
+                               (Vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT .|. Vk.ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT) -- dst access mask
+                               Vk.zero -- dependency flags
+                           ]
+                         }
 
       startTime <- liftIO Chronos.now
 
@@ -202,9 +232,17 @@ main = do
                      , DescriptorTexture tex
                      ]
                   ]
-                , drawSubpass = subpass0
                 }
-            pure [draw]
+              passes = [ DrawRenderPass
+                           { drawRenderPass = rp
+                           , drawClearValues =
+                               [ Vk.Color $ Vk.Float32 0 0 0 0
+                               , Vk.DepthStencil $ Vk.ClearDepthStencilValue 1 0
+                               ]
+                           , drawSubpasses = [ DrawSubpass [ draw ] ]
+                           }
+                       ]
+            pure passes
 
         loop = do
           renderStep

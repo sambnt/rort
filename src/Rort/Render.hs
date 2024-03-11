@@ -10,14 +10,13 @@
 module Rort.Render where
 
 import Rort.Vulkan.Context ( VkContext, VkContext(..), vkGraphicsQueue, vkTransferQueue, vkTransferQueueIx, vkGraphicsQueueIx, vkPresentationQueue )
-import Rort.Render.Swapchain (Swapchain, vkSurfaceFormat, vkImageViews, vkExtent, throwSwapchainOutOfDate, throwSwapchainSubOptimal, vkSwapchain, SwapchainOutOfDate (SwapchainOutOfDate))
-import Rort.Render.Types ( DrawCall(PrimitiveDraw, IndexedDraw), Subpass(Subpass), DrawCallPrimitive(..), SubpassInfo(..), Draw(..), DrawCallIndexed(..), Shader(Shader), pipelineShaderStage, Handle (ShaderHandle, BufferHandle, RenderPassLayoutHandle, SubpassHandle, TextureHandle), ShaderInfo (..), Buffer(Buffer), BufferInfo (..), RenderPassLayout (RenderPassLayout), RenderPassLayoutInfo (RenderPassLayoutInfo), unsafeGetHandle, TextureInfo (TextureInfo), Texture(Texture), DrawDescriptor (..) )
+import Rort.Render.Swapchain (Swapchain, vkImageViews, vkExtent, throwSwapchainOutOfDate, throwSwapchainSubOptimal, vkSwapchain, SwapchainOutOfDate (SwapchainOutOfDate), vkDepthFormat, vkSwapchainHeight, vkSwapchainWidth)
+import Rort.Render.Types ( Subpass(..), DrawRenderPass(..), Attachment(..), DrawCall(PrimitiveDraw, IndexedDraw), Subpass(Subpass), DrawCallPrimitive(..), SubpassInfo(..), Draw(..), DrawCallIndexed(..), Shader(Shader), pipelineShaderStage, Handle (ShaderHandle, BufferHandle, RenderPassHandle, TextureHandle), ShaderInfo (..), Buffer(Buffer), BufferInfo (..), RenderPass (RenderPass), unsafeGetHandle, TextureInfo (TextureInfo), Texture(Texture), DrawDescriptor (..), AttachmentFormat (..), toAttachmentDescription, DrawRenderPass, DrawSubpass (DrawSubpass), RenderPassInfo(..) )
 import qualified Vulkan as Vk
 import qualified Vulkan.Zero as Vk
 import qualified Data.Vector as Vector
 import qualified Vulkan.Core10.FundamentalTypes as Extent2D (Extent2D(width, height))
 import Rort.Vulkan (withVkRenderPass, withVkGraphicsPipelines, withVkFramebuffer, withVkPipelineLayout, withVkShaderModule, withVkCommandBuffers, withSemaphore, withVkDescriptorSetLayout, withSampler, withImageView)
-import qualified Vulkan.Extensions.VK_KHR_surface as VkFormat
 import qualified Vulkan.CStruct.Extends as Vk
 import Data.Bits ((.|.), (.&.))
 import Control.Monad (forM, forM_, unless)
@@ -29,10 +28,10 @@ import Foreign (nullPtr, castPtr, pokeArray, Storable)
 import Data.Acquire (Acquire, allocateAcquire, with)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
-import Rort.Util.Defer (defer, evalEmpty, getSeed, eval, unsafeGet)
+import Rort.Util.Defer (defer, evalEmpty, eval, unsafeGet)
 import Control.Monad.Trans.Resource (MonadResource, MonadUnliftIO, runResourceT, release)
 import Control.Exception.Safe (MonadMask, try, finally, mask, onException)
-import Rort.Allocator (withBuffer, withAllocPtr, flush, getAllocData, getAllocOffset, requiresBufferCopy, withImage)
+import Rort.Allocator (withBuffer, withAllocPtr, flush, getAllocData, getAllocOffset, requiresBufferCopy, withImage, Allocator, withImageAttachment)
 import Control.Concurrent.STM (TQueue, newTQueueIO, writeTQueue)
 import qualified Control.Concurrent.STM as STM
 import Rort.Render.SwapchainImages (SwapchainImages, SwapchainImage (SwapchainImage))
@@ -43,8 +42,7 @@ import Data.Function ((&))
 data Renderer
   = Renderer { rendererSwapchain      :: SwapchainImages
              , rendererFramesInFlight :: FramesInFlight
-             , rendererLayouts        :: TQueue (Handle RenderPassLayout)
-             , rendererPasses         :: TQueue (Handle Subpass)
+             , rendererPasses         :: TQueue (Handle RenderPass)
              , rendererDevice         :: Vk.Device
              , rendererPendingWrites  :: TQueue BufferCopy
              }
@@ -93,7 +91,7 @@ recordBufferImageCopies
   -> [BufferImageCopyInfo]
   -> m ()
 recordBufferImageCopies _ctx _cmdPool _cmdBuffer [] = pure ()
-recordBufferImageCopies ctx cmdPool cmdBuffer bufferImageCopyInfos = do
+recordBufferImageCopies ctx _cmdPool cmdBuffer bufferImageCopyInfos = do
   let
     memBarriers = flip foldMap bufferImageCopyInfos $ \copy ->
       let
@@ -301,8 +299,7 @@ createRenderer ctx numFramesInFlight = do
   framesInFlight <-
     withFramesInFlight (vkDevice ctx) (vkQueueFamilies ctx) numFramesInFlight
 
-  layoutsQue <- liftIO newTQueueIO
-  passesQue <- liftIO newTQueueIO
+  renderPassQue <- liftIO newTQueueIO
 
   pendingWrites <- liftIO newTQueueIO
 
@@ -310,29 +307,28 @@ createRenderer ctx numFramesInFlight = do
     Renderer
       swapchainImgs
       framesInFlight
-      layoutsQue
-      passesQue
+      renderPassQue
       (vkDevice ctx)
       pendingWrites
 
-submit :: (MonadResource m, MonadMask m, MonadUnliftIO m) => VkContext -> Renderer -> (Swapchain -> m [Draw]) -> m ()
+submit :: (MonadResource m, MonadMask m, MonadUnliftIO m) => VkContext -> Renderer -> (Swapchain -> m [DrawRenderPass]) -> m ()
 submit ctx r getDraws = do
   result <- try $ Swapchain.withSwapchainImage r.rendererSwapchain $ \(SwapchainImage _ swapchain) -> do
-    draws <- getDraws swapchain
-    forM_ draws $ \draw -> do
-      let
-        s@(SubpassHandle h) = drawSubpass draw
-        subpassInfo = getSeed h
-      _ <- evalRenderPassLayout (vkDevice ctx) swapchain subpassInfo.layout
-      _ <- evalSubpass (vkDevice ctx) swapchain s
-      let buffers = drawVertexBuffers draw <> fmap fst (drawIndexBuffers draw)
-      mapM_ (evalBuffer ctx r) buffers
-      let
-        textures = flip foldMap (concat $ drawDescriptors draw) $ \case
-          (DescriptorUniform _) -> []
-          (DescriptorTexture t) -> [t]
+    rpDraws <- getDraws swapchain
+    -- Eval all
+    forM_ rpDraws $ \rpDraw -> do
+      _ <- evalRenderPass (vkAllocator ctx) (vkDevice ctx) swapchain rpDraw.drawRenderPass
+      forM_ rpDraw.drawSubpasses $ \(DrawSubpass draws) -> do
+        forM_ draws $ \draw -> do
+          let buffers = drawVertexBuffers draw <> fmap fst (drawIndexBuffers draw)
+          mapM_ (evalBuffer ctx r) buffers
 
-      mapM_ (evalTexture ctx r) textures
+          let
+            textures = flip foldMap (concat $ drawDescriptors draw) $ \case
+              (DescriptorUniform _) -> []
+              (DescriptorTexture t) -> [t]
+          mapM_ (evalTexture ctx r) textures
+
     withNextFrameInFlight
       (vkDevice ctx)
       (rendererFramesInFlight r)
@@ -358,17 +354,12 @@ submit ctx r getDraws = do
             unless (null bufferCopies) $ liftIO $ print bufferCopies
             restore (recordCopies ctx cmdPool cmdBuffer bufferCopies)
               `onException` liftIO (STM.atomically $ forM_ bufferCopies $ STM.writeTQueue r.rendererPendingWrites)
-          forM_ draws $ \draw -> do
-            let
-              (SubpassHandle h) = draw.drawSubpass
-              subpassInfo = getSeed h
-            (RenderPassLayout rp framebuffers) <-
-              unsafeGetHandle subpassInfo.layout
-            (Subpass pipeline pipelineLayout setLayouts) <-
-              unsafeGetHandle draw.drawSubpass
+          forM_ rpDraws $ \rpDraw -> do
+            (RenderPass rp framebuffers passes) <-
+              unsafeGetHandle rpDraw.drawRenderPass
             let framebuffer = framebuffers !! fromIntegral imageIndex
             let
-              clearValues = Vector.fromList [Vk.Color $ Vk.Float32 0 0 0 0]
+              clearValues = Vector.fromList rpDraw.drawClearValues
               renderStartPos = Vk.Offset2D 0 0
               renderExtent = vkExtent swapchain
               renderPassBeginInfo =
@@ -400,101 +391,105 @@ submit ctx r getDraws = do
               0
               (Vector.singleton scissor)
 
-            Vk.cmdBindPipeline
-              cmdBuffer
-              Vk.PIPELINE_BIND_POINT_GRAPHICS
-              pipeline
-
-            (vertexBufs, vertexOffsets)
-              <- drawVertexBuffers draw
-                 & mapM (\(BufferHandle d) -> unsafeGet d)
-                 <&> unzip . fmap (\(Buffer buf off _sz) -> (buf, off))
-            unless (null vertexBufs) $
-              Vk.cmdBindVertexBuffers
-                cmdBuffer
-                0 -- first binding
-                (Vector.fromList vertexBufs)
-                (Vector.fromList vertexOffsets)
-            forM_ (drawIndexBuffers draw) $ \(BufferHandle d, indexType) -> do
-              (Buffer indexBuf offset _sz) <- unsafeGet d
-              Vk.cmdBindIndexBuffer
-                cmdBuffer
-                indexBuf
-                offset
-                indexType
-
-
-            unless (null setLayouts) $ do
-              sets <-
-                -- Not recommended to free descriptor sets, just reset pool. So
-                -- we don't setup a destructor here.
-                fmap Vector.toList $ Vk.allocateDescriptorSets
-                  (vkDevice ctx)
-                  $ Vk.DescriptorSetAllocateInfo
-                      ()
-                      descPool
-                      (Vector.fromList setLayouts)
-
-              (writes :: [Vk.WriteDescriptorSet '[]]) <-
-                fmap concat $ forM (zip sets (drawDescriptors draw)) $ \(set, ds) ->
-                  fmap concat $ forM (zip [0..] ds) $ \(ix, descriptor) ->
-                    case descriptor of
-                      (DescriptorUniform (Buffer buf off sz)) ->
-                        pure [ Vk.WriteDescriptorSet
-                                 ()
-                                 set -- dst set
-                                 ix -- dst binding
-                                 0 -- dst array element
-                                 1 -- descriptor count
-                                 Vk.DESCRIPTOR_TYPE_UNIFORM_BUFFER -- type
-                                 mempty -- image info
-                                 -- buffer info
-                                 ( Vector.singleton $
-                                     Vk.DescriptorBufferInfo
-                                       buf
-                                       off -- offset
-                                       sz
-                                 )
-                                 mempty -- texel buffer view
-                             ]
-                      (DescriptorTexture (TextureHandle th)) -> do
-                        (Texture _img imgView sampler) <- unsafeGet th
-                        pure [ Vk.WriteDescriptorSet
-                                 ()
-                                 set -- dst set
-                                 ix -- dst binding
-                                 0 -- dst array element
-                                 1 -- descriptor count
-                                 Vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER -- type
-                                 ( Vector.singleton $ Vk.DescriptorImageInfo
-                                     sampler
-                                     imgView
-                                     Vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-                                 ) -- image info
-                                 mempty -- buffer info
-                                 mempty -- texel buffer view
-                             ]
-
-              liftIO $ Vk.updateDescriptorSets (vkDevice ctx)
-                (fmap Vk.SomeStruct . Vector.fromList $ writes)
-                -- copies
-                mempty
-
-              Vk.cmdBindDescriptorSets
+            forM_ (zip passes rpDraw.drawSubpasses) $ \(subpass, (DrawSubpass draws)) -> do
+              Vk.cmdBindPipeline
                 cmdBuffer
                 Vk.PIPELINE_BIND_POINT_GRAPHICS
-                pipelineLayout
-                0 -- first set
-                (Vector.fromList sets)
-                mempty -- dynamic offsets
+                subpass.subpassPipeline
 
-            case drawCall draw of
-              (IndexedDraw (DrawCallIndexed indexCount instanceCount firstIndex vertexOffset firstInstance)) ->
-                Vk.cmdDrawIndexed
-                  cmdBuffer indexCount instanceCount firstIndex vertexOffset firstInstance
-              (PrimitiveDraw (DrawCallPrimitive firstVertex firstInstance instanceCount vertexCount)) ->
-                Vk.cmdDraw
-                  cmdBuffer vertexCount instanceCount firstVertex firstInstance
+              sets <-
+                if null subpass.subpassSetLayouts
+                then pure []
+                else
+                  -- Not recommended to free descriptor sets, just reset pool. So
+                  -- we don't setup a destructor here.
+                  fmap Vector.toList $ Vk.allocateDescriptorSets
+                    (vkDevice ctx)
+                    $ Vk.DescriptorSetAllocateInfo
+                        ()
+                        descPool
+                        (Vector.fromList subpass.subpassSetLayouts)
+
+              forM_ draws $ \draw -> do
+                (vertexBufs, vertexOffsets)
+                  <- drawVertexBuffers draw
+                     & mapM (\(BufferHandle d) -> unsafeGet d)
+                     <&> unzip . fmap (\(Buffer buf off _sz) -> (buf, off))
+                unless (null vertexBufs) $
+                  Vk.cmdBindVertexBuffers
+                    cmdBuffer
+                    0 -- first binding
+                    (Vector.fromList vertexBufs)
+                    (Vector.fromList vertexOffsets)
+                forM_ (drawIndexBuffers draw) $ \(BufferHandle d, indexType) -> do
+                  (Buffer indexBuf offset _sz) <- unsafeGet d
+                  Vk.cmdBindIndexBuffer
+                    cmdBuffer
+                    indexBuf
+                    offset
+                    indexType
+
+                unless (null sets) $ do
+                  (writes :: [Vk.WriteDescriptorSet '[]]) <-
+                    fmap concat $ forM (zip sets (drawDescriptors draw)) $ \(set, ds) ->
+                      fmap concat $ forM (zip [0..] ds) $ \(ix, descriptor) ->
+                        case descriptor of
+                          (DescriptorUniform (Buffer buf off sz)) ->
+                            pure [ Vk.WriteDescriptorSet
+                                     ()
+                                     set -- dst set
+                                     ix -- dst binding
+                                     0 -- dst array element
+                                     1 -- descriptor count
+                                     Vk.DESCRIPTOR_TYPE_UNIFORM_BUFFER -- type
+                                     mempty -- image info
+                                     -- buffer info
+                                     ( Vector.singleton $
+                                         Vk.DescriptorBufferInfo
+                                           buf
+                                           off -- offset
+                                           sz
+                                     )
+                                     mempty -- texel buffer view
+                                 ]
+                          (DescriptorTexture (TextureHandle th)) -> do
+                            (Texture _img imgView sampler) <- unsafeGet th
+                            pure [ Vk.WriteDescriptorSet
+                                     ()
+                                     set -- dst set
+                                     ix -- dst binding
+                                     0 -- dst array element
+                                     1 -- descriptor count
+                                     Vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER -- type
+                                     ( Vector.singleton $ Vk.DescriptorImageInfo
+                                         sampler
+                                         imgView
+                                         Vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                                     ) -- image info
+                                     mempty -- buffer info
+                                     mempty -- texel buffer view
+                                 ]
+
+                  liftIO $ Vk.updateDescriptorSets (vkDevice ctx)
+                    (fmap Vk.SomeStruct . Vector.fromList $ writes)
+                    -- copies
+                    mempty
+
+                  Vk.cmdBindDescriptorSets
+                    cmdBuffer
+                    Vk.PIPELINE_BIND_POINT_GRAPHICS
+                    subpass.subpassPipelineLayout
+                    0 -- first set
+                    (Vector.fromList sets)
+                    mempty -- dynamic offsets
+
+                case drawCall draw of
+                  (IndexedDraw (DrawCallIndexed indexCount instanceCount firstIndex vertexOffset firstInstance)) ->
+                    Vk.cmdDrawIndexed
+                      cmdBuffer indexCount instanceCount firstIndex vertexOffset firstInstance
+                  (PrimitiveDraw (DrawCallPrimitive firstVertex firstInstance instanceCount vertexCount)) ->
+                    Vk.cmdDraw
+                      cmdBuffer vertexCount instanceCount firstVertex firstInstance
 
             Vk.cmdEndRenderPass cmdBuffer
           Vk.endCommandBuffer cmdBuffer
@@ -503,13 +498,9 @@ submit ctx r getDraws = do
     Left SwapchainOutOfDate ->
       Swapchain.recreateSwapchain ctx r.rendererSwapchain $ \newSc -> do
         void $ mask $ \restore -> do
-          rps <- liftIO $ STM.atomically $ STM.flushTQueue r.rendererLayouts
-          restore (mapM (evalRenderPassLayout' (vkDevice ctx) newSc) rps)
-            `finally` (liftIO $ STM.atomically $ forM_ rps (writeTQueue r.rendererLayouts))
-        void $ mask $ \restore -> do
-          ps <- liftIO $ STM.atomically $ STM.flushTQueue r.rendererPasses
-          restore (mapM (evalSubpass (vkDevice ctx) newSc) ps)
-            `finally` (liftIO $ STM.atomically $ forM_ ps (writeTQueue r.rendererPasses))
+          rps <- liftIO $ STM.atomically $ STM.flushTQueue r.rendererPasses
+          restore (mapM (evalRenderPass' (vkAllocator ctx) (vkDevice ctx) newSc) rps)
+            `finally` (liftIO $ STM.atomically $ forM_ rps (writeTQueue r.rendererPasses))
     Right x ->
       pure x
 
@@ -529,7 +520,7 @@ evalTexture
   => VkContext -> Renderer -> Handle Texture -> m Texture
 evalTexture ctx r (TextureHandle d) = do
   evalEmpty d $ \texInfo ->
-    with texInfo $ \(TextureInfo format w h sz (imgData :: [x])) -> do
+    with texInfo $ \(TextureInfo fmt w h sz (imgData :: [x])) -> do
       props <- Vk.getPhysicalDeviceProperties $ vkPhysicalDevice ctx
       let
         imageCreateInfo = Vk.ImageCreateInfo
@@ -584,7 +575,7 @@ evalTexture ctx r (TextureHandle d) = do
           Vk.zero
           (getAllocData imgAlloc)
           Vk.IMAGE_VIEW_TYPE_2D
-          format
+          fmt
           (Vk.ComponentMapping Vk.COMPONENT_SWIZZLE_IDENTITY
                                Vk.COMPONENT_SWIZZLE_IDENTITY
                                Vk.COMPONENT_SWIZZLE_IDENTITY
@@ -649,93 +640,112 @@ buffer
 buffer _ use bufferDat =
   BufferHandle <$> defer (BufferInfo use bufferDat)
 
-renderPassLayout
+renderPass
   :: MonadIO m
   => Renderer
-  -> m (Handle RenderPassLayout)
-renderPassLayout r = do
-  h <- RenderPassLayoutHandle <$> defer RenderPassLayoutInfo
-  liftIO $ STM.atomically $ writeTQueue (rendererLayouts r) h
-  pure h
-
-subpass
-  :: MonadIO m
-  => Renderer
-  -> SubpassInfo
-  -> m (Handle Subpass)
-subpass r subpassInfo = do
-  h <- SubpassHandle <$> defer subpassInfo
+  -> RenderPassInfo
+  -> m (Handle RenderPass)
+renderPass r info = do
+  h <- RenderPassHandle <$> defer info
   liftIO $ STM.atomically $ writeTQueue (rendererPasses r) h
   pure h
 
-evalRenderPassLayout
-  :: (MonadResource m, MonadMask m)
-  => Vk.Device
+evalRenderPass
+  :: (MonadResource m, MonadMask m, MonadUnliftIO m)
+  => Allocator
+  -> Vk.Device
   -> Swapchain
-  -> Handle RenderPassLayout
-  -> m RenderPassLayout
-evalRenderPassLayout device swapchain (RenderPassLayoutHandle d) = do
-  (_relKey, l) <- evalEmpty d $ \RenderPassLayoutInfo -> allocateAcquire $ do
-    acquireRenderPassLayout device swapchain
+  -> Handle RenderPass
+  -> m RenderPass
+evalRenderPass allocator device swapchain (RenderPassHandle d) = do
+  (_relKey, l) <- evalEmpty d $ \info -> do
+    forM_ info.subpasses $ \subpassInfo ->
+      forM_ subpassInfo.shaderStages $ evalShader device
+    allocateAcquire $
+      acquireRenderPass allocator device swapchain info
   pure l
 
-evalRenderPassLayout'
-  :: (MonadResource m, MonadMask m)
-  => Vk.Device
+evalRenderPass'
+  :: (MonadResource m, MonadMask m, MonadUnliftIO m)
+  => Allocator
+  -> Vk.Device
   -> Swapchain
-  -> Handle RenderPassLayout
-  -> m RenderPassLayout
-evalRenderPassLayout' device swapchain (RenderPassLayoutHandle d) = do
-  (_relKey, l) <- eval d $ \RenderPassLayoutInfo mOld ->
-    allocateAcquire (acquireRenderPassLayout device swapchain)
+  -> Handle RenderPass
+  -> m RenderPass
+evalRenderPass' allocator device swapchain (RenderPassHandle d) = do
+  (_relKey, l) <- eval d $ \info mOld -> do
+    forM_ info.subpasses $ \subpassInfo ->
+      forM_ subpassInfo.shaderStages $ evalShader device
+    allocateAcquire (acquireRenderPass allocator device swapchain info)
     <* (case mOld of
           Nothing -> pure ()
           Just (oldRel, _) -> release oldRel
        )
   pure l
 
-acquireRenderPassLayout :: Vk.Device -> Swapchain -> Acquire RenderPassLayout
-acquireRenderPassLayout device swapchain = do
+acquireRenderPass
+  :: Allocator
+  -> Vk.Device
+  -> Swapchain
+  -> RenderPassInfo
+  -> Acquire RenderPass
+acquireRenderPass allocator device swapchain info = do
   rp <- withVkRenderPass device
     $ Vk.RenderPassCreateInfo
        ()
         Vk.zero
         -- attachment descriptions
-        ( Vector.singleton $ Vk.AttachmentDescription
-            Vk.zero
-            (VkFormat.format $ vkSurfaceFormat swapchain)
-            Vk.SAMPLE_COUNT_1_BIT            -- Samples
-            Vk.ATTACHMENT_LOAD_OP_CLEAR      -- Load op, what to do with framebuffer before rendering
-            Vk.ATTACHMENT_STORE_OP_STORE     -- Store op, store the framebuffer
-            Vk.ATTACHMENT_LOAD_OP_DONT_CARE  -- Stencil load op
-            Vk.ATTACHMENT_STORE_OP_DONT_CARE -- Stencil store op
-            Vk.IMAGE_LAYOUT_UNDEFINED        -- Initial layout
-            Vk.IMAGE_LAYOUT_PRESENT_SRC_KHR  -- Final layout
-        )
+        ( Vector.fromList $ fmap (toAttachmentDescription swapchain) info.attachments)
         -- subpass descriptions
-        ( Vector.singleton $ Vk.SubpassDescription
-            Vk.zero
-            Vk.PIPELINE_BIND_POINT_GRAPHICS
-            Vector.empty -- input attachments
-            -- color attachments
-            ( Vector.singleton $ Vk.AttachmentReference
-                0 -- attachment ix
-                Vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
-            )
-            Vector.empty -- resolve attachments
-            Nothing      -- depth stencil attachments
-            Vector.empty -- preserve attachments
-        )
+        ( Vector.fromList $ fmap (.attachmentUsage) info.subpasses )
         -- subpass dependencies
-        ( Vector.singleton $ Vk.SubpassDependency
-            Vk.SUBPASS_EXTERNAL -- src subpass
-            0 -- dst subpass
-            Vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT -- src stage mask
-            Vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT -- dst stage mask
-            Vk.zero -- src access mask
-            Vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT -- dst access mask
-            Vk.zero -- dependency flags
-        )
+        ( Vector.fromList info.subpassDependencies )
+
+  let
+  imageViewFunctions <- forM info.attachments $ \a ->
+    case a.format of
+      SwapchainColorFormat -> pure id
+      SwapchainDepthFormat -> do
+        imgAlloc <- withImageAttachment allocator
+          $ Vk.ImageCreateInfo
+              ()
+              Vk.zero
+              Vk.IMAGE_TYPE_2D -- imageType
+              (vkDepthFormat swapchain) -- format
+              (Vk.Extent3D (vkSwapchainWidth swapchain) (vkSwapchainHeight swapchain) 1) -- extent
+              1 -- mipLevels
+              1 -- arrayLayers
+              Vk.SAMPLE_COUNT_1_BIT -- samples
+              Vk.IMAGE_TILING_OPTIMAL -- tiling
+              Vk.IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT -- usage
+              Vk.SHARING_MODE_EXCLUSIVE -- sharingMode
+              Vector.empty -- queueFamilyIndices, ignored because SHARING_MODE not "concurrent"
+              Vk.IMAGE_LAYOUT_UNDEFINED -- initialLayout
+        let
+          imageViewCreateInfo = Vk.ImageViewCreateInfo
+            ()
+            Vk.zero
+            (getAllocData imgAlloc)
+            Vk.IMAGE_VIEW_TYPE_2D
+            (vkDepthFormat swapchain)
+            (Vk.ComponentMapping Vk.COMPONENT_SWIZZLE_IDENTITY
+                                 Vk.COMPONENT_SWIZZLE_IDENTITY
+                                 Vk.COMPONENT_SWIZZLE_IDENTITY
+                                 Vk.COMPONENT_SWIZZLE_IDENTITY
+            )
+            (Vk.ImageSubresourceRange
+              Vk.IMAGE_ASPECT_DEPTH_BIT -- Colour target
+              0 -- Base mipmap level
+              1 -- Mipmap levels
+              0 -- Base layer
+              1 -- Layer count
+            )
+
+        imgView <-
+          withImageView device imageViewCreateInfo
+        pure $ const imgView
+      _ -> error "Attachment image format unhandled"
+
 
   framebuffers <-
     forM (Vector.toList $ vkImageViews swapchain) $ \iv -> do
@@ -744,55 +754,28 @@ acquireRenderPassLayout device swapchain = do
           ()
           Vk.zero
           rp -- render pass
-          (Vector.singleton iv) -- attachments
+          (Vector.fromList $ fmap ($ iv) imageViewFunctions) -- attachments
           -- dimensions
           (Extent2D.width $ vkExtent swapchain)
           (Extent2D.height $ vkExtent swapchain)
           1 -- layers
-  pure $ RenderPassLayout rp framebuffers
 
-evalSubpass
-  :: (MonadMask m, MonadUnliftIO m, MonadResource m)
-  => Vk.Device
-  -> Swapchain
-  -> Handle Subpass
-  -> m Subpass
-evalSubpass device swapchain (SubpassHandle d) = do
-  (_relKey, pass) <- evalEmpty d $ \subpassInfo -> do
-    (RenderPassLayout rp _framebuffers) <-
-      evalRenderPassLayout device swapchain subpassInfo.layout
-    shaders <-
-      mapM (evalShader device) subpassInfo.shaderStages
-    allocateAcquire $
-      acquireSubpass device subpassInfo shaders rp
-  pure pass
+  sps <- forM (zip [0..] info.subpasses) $ \(ix, sp) ->
+    acquireSubpass device rp sp ix
 
-evalSubpass'
-  :: (MonadMask m, MonadUnliftIO m, MonadResource m)
-  => Vk.Device
-  -> Swapchain
-  -> Handle Subpass
-  -> m Subpass
-evalSubpass' device swapchain (SubpassHandle d) = do
-  (_relKey, pass) <- eval d $ \subpassInfo mOld -> do
-    (RenderPassLayout rp _framebuffers) <-
-      evalRenderPassLayout device swapchain subpassInfo.layout
-    shaders <-
-      mapM (evalShader device) subpassInfo.shaderStages
-    allocateAcquire (acquireSubpass device subpassInfo shaders rp)
-      <* (case mOld of
-            Nothing -> pure ()
-            Just (oldRel, _) -> release oldRel
-         )
-  pure pass
+  pure $ RenderPass rp framebuffers sps
 
 acquireSubpass
   :: Vk.Device
-  -> SubpassInfo
-  -> [Shader]
   -> Vk.RenderPass
+  -> SubpassInfo
+  -> Word32
   -> Acquire Subpass
-acquireSubpass device subpassInfo shaders rp = do
+acquireSubpass device rp subpassInfo subpassIx = do
+  -- TODO: Better interface for handles
+  shaders <-
+    mapM (\(ShaderHandle d) -> unsafeGet d) subpassInfo.shaderStages
+
   setLayouts <-
     forM subpassInfo.descriptors $ \set ->
       withVkDescriptorSetLayout device
@@ -911,7 +894,7 @@ acquireSubpass device subpassInfo shaders rp = do
       )
       pipelineLayout
       rp
-      subpassInfo.subpassIndex -- subpass index
+      subpassIx -- subpass index
       Vk.NULL_HANDLE -- pipeline handle (inheritance)
       (-1) -- pipeline index (inheritance)
 

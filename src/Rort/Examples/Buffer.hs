@@ -10,13 +10,15 @@ import Control.Monad.Trans.Resource (runResourceT)
 import qualified Data.Vector as Vector
 import qualified Vulkan as Vk
 import Control.Monad.IO.Class (liftIO)
-import Rort.Render.Types (SubpassInfo(..), Draw(..), DrawCallIndexed(..), DrawCall (IndexedDraw))
-import Rort.Render (createRenderer, shader, buffer, renderPassLayout, subpass, submit)
+import Rort.Render.Types (SubpassInfo(..), Draw(..), DrawCallIndexed(..), DrawCall (IndexedDraw), RenderPassInfo (..), DrawRenderPass (..), DrawSubpass (DrawSubpass), Attachment (Attachment), AttachmentFormat (SwapchainColorFormat), noUsage, useColorAttachment)
+import Rort.Render (createRenderer, shader, buffer, renderPass, submit)
 import Control.Monad (when)
 import Foreign (sizeOf, Word16)
 import Rort.Window.Types (WindowEvent(..))
 import Data.Acquire (allocateAcquire)
+import qualified Vulkan.Zero as Vk
 import qualified Data.ByteString.Lazy as BSL
+import Data.Function ((&))
 
 main :: IO ()
 main = do
@@ -78,33 +80,54 @@ main = do
         buffer r Vk.BUFFER_USAGE_INDEX_BUFFER_BIT
           $ pure (indexBufferSize, indices)
 
-      rpLayout <-
-        renderPassLayout r
-      subpass0 <-
-        subpass r (SubpassInfo { shaderStages     = [vertShader, fragShader]
-                               , descriptors      = []
-                               , vertexBindings   =
-                                   [ Vk.VertexInputBindingDescription
-                                     0 -- first vertex buffer bound
-                                     (fromIntegral $ sizeOf (undefined :: Float) * 5)
-                                     Vk.VERTEX_INPUT_RATE_VERTEX
-                                   ]
-                               , vertexAttributes =
-                                   [ Vk.VertexInputAttributeDescription
-                                       0 -- location (pos)
-                                       0 -- binding
-                                       Vk.FORMAT_R32G32_SFLOAT
-                                       0 -- offset
-                                   , Vk.VertexInputAttributeDescription
-                                       1 -- location (color)
-                                       0 -- binding
-                                       Vk.FORMAT_R32G32B32_SFLOAT
-                                       (fromIntegral $ sizeOf (undefined :: Float) * 2)
-                                   ]
-                               , layout           = rpLayout
-                               , subpassIndex     = 0
-                               }
-                  )
+      let
+        subpass0 =
+          SubpassInfo { shaderStages     = [vertShader, fragShader]
+                      , descriptors      = []
+                      , vertexBindings   =
+                          [ Vk.VertexInputBindingDescription
+                              0 -- first vertex buffer bound
+                              (fromIntegral $ sizeOf (undefined :: Float) * 5)
+                              Vk.VERTEX_INPUT_RATE_VERTEX
+                          ]
+                      , vertexAttributes =
+                          [ Vk.VertexInputAttributeDescription
+                              0 -- location (pos)
+                              0 -- binding
+                              Vk.FORMAT_R32G32_SFLOAT
+                              0 -- offset
+                          , Vk.VertexInputAttributeDescription
+                            1 -- location (color)
+                            0 -- binding
+                            Vk.FORMAT_R32G32B32_SFLOAT
+                            (fromIntegral $ sizeOf (undefined :: Float) * 2)
+                          ]
+                      , attachmentUsage = noUsage
+                                          & useColorAttachment 0
+                      }
+
+      rp <-
+        renderPass r $
+          RenderPassInfo { attachments =
+                             [ Attachment
+                                 SwapchainColorFormat
+                                 Vk.ATTACHMENT_LOAD_OP_CLEAR
+                                 Vk.ATTACHMENT_STORE_OP_STORE
+                                 Vk.IMAGE_LAYOUT_UNDEFINED
+                                 Vk.IMAGE_LAYOUT_PRESENT_SRC_KHR
+                             ]
+                         , subpasses = [ subpass0 ]
+                         , subpassDependencies = [
+                             Vk.SubpassDependency
+                               Vk.SUBPASS_EXTERNAL -- src subpass
+                               0 -- dst subpass
+                               Vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT -- src stage mask
+                               Vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT -- dst stage mask
+                               Vk.zero -- src access mask
+                               Vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT -- dst access mask
+                               Vk.zero -- dependency flags
+                           ]
+                         }
 
 
       let
@@ -121,10 +144,16 @@ main = do
                     }
                 , drawVertexBuffers = [vertexBuffer]
                 , drawIndexBuffers = [(indexBuffer, Vk.INDEX_TYPE_UINT16)]
-                , drawSubpass = subpass0
                 , drawDescriptors = []
                 }
-            pure [draw]
+            pure [ DrawRenderPass
+                     { drawRenderPass = rp
+                     , drawClearValues =
+                         [ Vk.Color $ Vk.Float32 0 0 0 0
+                         ]
+                     , drawSubpasses = [ DrawSubpass [ draw ] ]
+                     }
+                 ]
 
         loop = do
           renderStep

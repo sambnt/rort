@@ -20,14 +20,15 @@ import qualified Rort.Allocator as Allocator
 import qualified Chronos
 import Control.Lens ((%~))
 import Data.Acquire (allocateAcquire)
-import Rort.Render.Types (SubpassInfo(..), Draw(..), DrawCallIndexed(..), DrawCall (IndexedDraw), Buffer (Buffer), TextureInfo (TextureInfo), DrawDescriptor (..))
-import Rort.Render (createRenderer, shader, buffer, renderPassLayout, subpass, submit, texture, evalTexture)
+import Rort.Render.Types (SubpassInfo(..), Draw(..), DrawCallIndexed(..), DrawCall (IndexedDraw), Buffer (Buffer), TextureInfo (TextureInfo), DrawDescriptor (..), RenderPassInfo (..), DrawRenderPass (..), DrawSubpass (DrawSubpass), Attachment (Attachment), AttachmentFormat (SwapchainColorFormat), noUsage, useColorAttachment)
+import Rort.Render (createRenderer, shader, buffer, renderPass, submit, texture, evalTexture)
 import Control.Monad (when)
 import Foreign (sizeOf, Word8, Word16, pokeArray, castPtr, peekArray)
 import Rort.Window.Types (WindowEvent(..))
 import qualified Data.ByteString.Lazy as BSL
 import qualified Codec.Image.STB as STB
 import Data.Bitmap (withBitmap)
+import qualified Vulkan.Zero as Vk
 
 main :: IO ()
 main = do
@@ -108,52 +109,73 @@ main = do
         buffer r Vk.BUFFER_USAGE_INDEX_BUFFER_BIT
           $ pure (indexBufferSize, indices)
 
-      rpLayout <-
-        renderPassLayout r
-      subpass0 <-
-        subpass r (SubpassInfo { shaderStages     = [vertShader, fragShader]
-                               , descriptors      = [
-                                   [ Vk.DescriptorSetLayoutBinding
-                                       0 -- binding in shader
-                                       Vk.DESCRIPTOR_TYPE_UNIFORM_BUFFER
-                                       1 -- descriptor count
-                                       Vk.SHADER_STAGE_VERTEX_BIT
-                                       Vector.empty -- immutable samplers
-                                   , Vk.DescriptorSetLayoutBinding
-                                       1 -- binding in shader
-                                       Vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
-                                       1 -- descriptor count
-                                       Vk.SHADER_STAGE_FRAGMENT_BIT
-                                       Vector.empty -- immutable samplers
-                                   ]
-                                 ]
-                               , vertexBindings   =
-                                   [ Vk.VertexInputBindingDescription
-                                     0 -- first vertex buffer bound
-                                     (fromIntegral $ sizeOf (undefined :: Float) * 7)
-                                     Vk.VERTEX_INPUT_RATE_VERTEX
-                                   ]
-                               , vertexAttributes =
-                                   [ Vk.VertexInputAttributeDescription
-                                       0 -- location (pos)
-                                       0 -- binding
-                                       Vk.FORMAT_R32G32_SFLOAT
-                                       0 -- offset
-                                   , Vk.VertexInputAttributeDescription
-                                       1 -- location (color)
-                                       0 -- binding
-                                       Vk.FORMAT_R32G32B32_SFLOAT
-                                       (fromIntegral $ sizeOf (undefined :: Float) * 2)
-                                   , Vk.VertexInputAttributeDescription
-                                       2 -- location (color)
-                                       0 -- binding
-                                       Vk.FORMAT_R32G32_SFLOAT
-                                       (fromIntegral $ sizeOf (undefined :: Float) * 5)
-                                   ]
-                               , layout           = rpLayout
-                               , subpassIndex     = 0
-                               }
-                  )
+      let
+        subpass0 =
+          SubpassInfo { shaderStages     = [vertShader, fragShader]
+                      , descriptors      = [
+                          [ Vk.DescriptorSetLayoutBinding
+                              0 -- binding in shader
+                              Vk.DESCRIPTOR_TYPE_UNIFORM_BUFFER
+                              1 -- descriptor count
+                              Vk.SHADER_STAGE_VERTEX_BIT
+                              Vector.empty -- immutable samplers
+                          , Vk.DescriptorSetLayoutBinding
+                              1 -- binding in shader
+                              Vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+                              1 -- descriptor count
+                              Vk.SHADER_STAGE_FRAGMENT_BIT
+                              Vector.empty -- immutable samplers
+                          ]
+                        ]
+                      , vertexBindings   =
+                          [ Vk.VertexInputBindingDescription
+                            0 -- first vertex buffer bound
+                            (fromIntegral $ sizeOf (undefined :: Float) * 7)
+                            Vk.VERTEX_INPUT_RATE_VERTEX
+                          ]
+                      , vertexAttributes =
+                          [ Vk.VertexInputAttributeDescription
+                              0 -- location (pos)
+                              0 -- binding
+                              Vk.FORMAT_R32G32_SFLOAT
+                              0 -- offset
+                          , Vk.VertexInputAttributeDescription
+                              1 -- location (color)
+                              0 -- binding
+                              Vk.FORMAT_R32G32B32_SFLOAT
+                              (fromIntegral $ sizeOf (undefined :: Float) * 2)
+                          , Vk.VertexInputAttributeDescription
+                              2 -- location (color)
+                              0 -- binding
+                              Vk.FORMAT_R32G32_SFLOAT
+                              (fromIntegral $ sizeOf (undefined :: Float) * 5)
+                          ]
+                      , attachmentUsage = noUsage
+                                          & useColorAttachment 0
+                      }
+
+      rp <-
+        renderPass r $
+          RenderPassInfo { attachments =
+                             [ Attachment
+                                 SwapchainColorFormat
+                                 Vk.ATTACHMENT_LOAD_OP_CLEAR
+                                 Vk.ATTACHMENT_STORE_OP_STORE
+                                 Vk.IMAGE_LAYOUT_UNDEFINED
+                                 Vk.IMAGE_LAYOUT_PRESENT_SRC_KHR
+                             ]
+                         , subpasses = [ subpass0 ]
+                         , subpassDependencies = [
+                             Vk.SubpassDependency
+                               Vk.SUBPASS_EXTERNAL -- src subpass
+                               0 -- dst subpass
+                               Vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT -- src stage mask
+                               Vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT -- dst stage mask
+                               Vk.zero -- src access mask
+                               Vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT -- dst access mask
+                               Vk.zero -- dependency flags
+                           ]
+                         }
 
       startTime <- liftIO Chronos.now
 
@@ -195,9 +217,15 @@ main = do
                      , DescriptorTexture tex
                      ]
                   ]
-                , drawSubpass = subpass0
                 }
-            pure [draw]
+            pure [ DrawRenderPass
+                    { drawRenderPass = rp
+                    , drawClearValues =
+                        [ Vk.Color $ Vk.Float32 0 0 0 0
+                        ]
+                    , drawSubpasses = [ DrawSubpass [ draw ] ]
+                    }
+                 ]
 
         loop = do
           renderStep

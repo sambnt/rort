@@ -11,10 +11,12 @@ import qualified Vulkan as Vk
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad (when)
 import Rort.Window.Types (WindowEvent(..))
-import Rort.Render (createRenderer, subpass, shader, renderPassLayout, submit)
-import Rort.Render.Types (Draw(..), SubpassInfo (..), DrawCallPrimitive (..), DrawCall (PrimitiveDraw))
+import Rort.Render (createRenderer, shader, renderPass, submit)
+import Rort.Render.Types (Draw(..), SubpassInfo (..), DrawCallPrimitive (..), DrawCall (PrimitiveDraw), RenderPassInfo (..), DrawRenderPass (..), DrawSubpass (DrawSubpass), Attachment (Attachment), AttachmentFormat (SwapchainColorFormat), noUsage, useColorAttachment)
 import Data.Acquire (allocateAcquire)
 import qualified Data.ByteString.Lazy as BSL
+import qualified Vulkan.Zero as Vk
+import Data.Function ((&))
 
 main :: IO ()
 main = do
@@ -53,17 +55,39 @@ main = do
         shader r Vk.SHADER_STAGE_FRAGMENT_BIT "main"
           (liftIO $ BSL.readFile "data/tri.frag.spv")
 
-      rpLayout <-
-        renderPassLayout r
-      subpass0 <-
-        subpass r (SubpassInfo { shaderStages     = [vertShader, fragShader]
-                               , descriptors      = []
-                               , vertexBindings   = []
-                               , vertexAttributes = []
-                               , layout           = rpLayout
-                               , subpassIndex     = 0
-                               }
-                  )
+      let
+        subpass0 =
+          SubpassInfo { shaderStages     = [vertShader, fragShader]
+                      , descriptors      = []
+                      , vertexBindings   = []
+                      , vertexAttributes = []
+                      , attachmentUsage  = noUsage
+                                           & useColorAttachment 0
+                      }
+
+      rp <-
+        renderPass r $
+          RenderPassInfo { attachments =
+                             [ Attachment
+                                 SwapchainColorFormat
+                                 Vk.ATTACHMENT_LOAD_OP_CLEAR
+                                 Vk.ATTACHMENT_STORE_OP_STORE
+                                 Vk.IMAGE_LAYOUT_UNDEFINED
+                                 Vk.IMAGE_LAYOUT_PRESENT_SRC_KHR
+                             ]
+                         , subpasses = [ subpass0 ]
+                         , subpassDependencies = [
+                             Vk.SubpassDependency
+                               Vk.SUBPASS_EXTERNAL -- src subpass
+                               0 -- dst subpass
+                               Vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT -- src stage mask
+                               Vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT -- dst stage mask
+                               Vk.zero -- src access mask
+                               Vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT -- dst access mask
+                               Vk.zero -- dependency flags
+                           ]
+                         }
+
       let
         renderStep = do
           submit ctx r $ \_ -> do
@@ -77,10 +101,16 @@ main = do
                              }
                 , drawVertexBuffers = []
                 , drawIndexBuffers = []
-                , drawSubpass = subpass0
                 , drawDescriptors = []
                 }
-            pure [draw]
+            pure [ DrawRenderPass
+                     { drawRenderPass = rp
+                     , drawClearValues =
+                         [ Vk.Color $ Vk.Float32 0 0 0 0
+                         ]
+                     , drawSubpasses = [ DrawSubpass [ draw ] ]
+                     }
+                 ]
 
         loop = do
           renderStep

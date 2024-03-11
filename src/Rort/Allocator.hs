@@ -285,3 +285,27 @@ withImage allocator createInfo imgSize = do
       (\(b, bufAlloc, _) -> Vma.destroyBuffer allocator b bufAlloc)
 
     pure $ StagingAllocation staging (img, alloc, allocInfo)
+
+withImageAttachment
+  :: Allocator
+  -> Vk.ImageCreateInfo '[]
+  -> Acquire (Allocation Vk.Image)
+withImageAttachment allocator createInfo = do
+  let
+    allocCreateInfo =
+      Vma.AllocationCreateInfo
+        -- Flags
+        Vma.ALLOCATION_CREATE_DEDICATED_MEMORY_BIT
+        Vma.MEMORY_USAGE_AUTO
+        Vk.zero -- required flags
+        Vk.zero -- preferred flags
+        Vk.zero -- Accept any memory types that meet the requirements
+        Vk.NULL_HANDLE -- pool to create allocation in
+        nullPtr -- userdata
+        1.0 -- priority
+
+  (img, alloc, allocInfo) <- mkAcquire
+    (Vma.createImage allocator createInfo allocCreateInfo)
+    (\(img, alloc, _allocInfo) -> Vma.destroyImage allocator img alloc)
+
+  pure $ DeviceAllocation (img, alloc, allocInfo)

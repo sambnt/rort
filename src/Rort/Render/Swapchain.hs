@@ -31,6 +31,10 @@ data Swapchain
               , vkExtent                   :: Vk.Extent2D
               }
 
+vkSwapchainWidth, vkSwapchainHeight  :: Swapchain -> Word32
+vkSwapchainWidth = Extent2D.width . vkExtent
+vkSwapchainHeight = Extent2D.height . vkExtent
+
 data SwapchainOutOfDate = SwapchainOutOfDate
   deriving (Eq, Show)
 

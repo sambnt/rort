@@ -1,6 +1,7 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE RankNTypes #-}
 
 module Rort.Render.Types where
@@ -15,6 +16,11 @@ import Rort.Util.Defer (Deferred, unsafeGet)
 import Control.Monad.Trans.Resource (ReleaseKey)
 import Control.Monad.IO.Class (MonadIO)
 import Foreign (Storable)
+import qualified Data.Vector as Vector
+import qualified Vulkan.Zero as Vk
+import qualified Vulkan.Core10.Pass as VkPass
+import Rort.Render.Swapchain (Swapchain, vkSurfaceFormat, vkDepthFormat)
+import qualified Vulkan.Extensions.VK_KHR_surface as VkFormat
 
 data DrawCallIndexed
   = DrawCallIndexed { drawCallIndexedIndexCount    :: Word32
@@ -39,26 +45,103 @@ data Draw
          , drawVertexBuffers  :: [Handle Buffer]
          , drawIndexBuffers   :: [(Handle Buffer, Vk.IndexType)]
          , drawDescriptors    :: [[DrawDescriptor]]
-         , drawSubpass        :: Handle Subpass
          }
+
+data DrawRenderPass = DrawRenderPass { drawRenderPass  :: Handle RenderPass
+                                     , drawClearValues :: [ Vk.ClearValue ]
+                                     , drawSubpasses   :: [ DrawSubpass ]
+                                     }
+
+data DrawSubpass = DrawSubpass { subpassDraws :: [ Draw ] }
 
 data DrawDescriptor = DescriptorUniform Buffer
                     | DescriptorTexture (Handle Texture)
 
-data RenderPassLayoutInfo = RenderPassLayoutInfo
+data AttachmentFormat = SwapchainColorFormat
+                      | SwapchainDepthFormat
+                      | VkFormat Vk.Format
 
-data RenderPassLayout
-  = RenderPassLayout { renderPass :: Vk.RenderPass
-                     , framebuffers :: [Vk.Framebuffer]
-                     }
+-- TODO: data Attachment = RenderAttachment
+                      -- | DepthAttachment
+                      -- | Attachment ... usage
+
+data Attachment = Attachment { format        :: AttachmentFormat
+                             , loadOp        :: Vk.AttachmentLoadOp
+                             , storeOp       :: Vk.AttachmentStoreOp
+                             , initialLayout :: Vk.ImageLayout
+                             , finalLayout   :: Vk.ImageLayout
+                             }
+
+toAttachmentDescription :: Swapchain -> Attachment -> Vk.AttachmentDescription
+toAttachmentDescription sc attach =
+  Vk.AttachmentDescription
+    Vk.zero
+    (case attach.format of
+       SwapchainColorFormat ->
+         VkFormat.format $ vkSurfaceFormat sc
+       SwapchainDepthFormat ->
+         vkDepthFormat sc
+       VkFormat fmt ->
+         fmt
+    )
+    Vk.SAMPLE_COUNT_1_BIT
+    attach.loadOp
+    attach.storeOp
+    Vk.ATTACHMENT_LOAD_OP_DONT_CARE                  -- Stencil load op
+    Vk.ATTACHMENT_STORE_OP_DONT_CARE                 -- Stencil store op
+    attach.initialLayout
+    attach.finalLayout
+
+data RenderPassInfo
+  = RenderPassInfo { attachments         :: [Attachment]
+                   , subpasses           :: [SubpassInfo]
+                   , subpassDependencies :: [Vk.SubpassDependency]
+                   }
+
+data RenderPass
+  = RenderPass { renderPass :: Vk.RenderPass
+               , framebuffers :: [Vk.Framebuffer]
+               , subpasses :: [Subpass]
+               }
+
+noUsage :: Vk.SubpassDescription
+noUsage =
+  Vk.SubpassDescription
+    Vk.zero
+    Vk.PIPELINE_BIND_POINT_GRAPHICS
+    Vector.empty
+    Vector.empty
+    Vector.empty
+    Nothing
+    Vector.empty
+
+useColorAttachment
+  :: Word32 -> Vk.SubpassDescription -> Vk.SubpassDescription
+useColorAttachment ix s =
+  s { VkPass.colorAttachments =
+        VkPass.colorAttachments s
+        <> Vector.fromList [ Vk.AttachmentReference
+                               ix
+                               Vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+                           ]
+    }
+
+useDepthAttachment
+  :: Word32 -> Vk.SubpassDescription -> Vk.SubpassDescription
+useDepthAttachment ix s =
+  s { VkPass.depthStencilAttachment =
+        Just ( Vk.AttachmentReference
+                 ix
+                 Vk.IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+             )
+    }
 
 data SubpassInfo
-  = SubpassInfo { shaderStages     :: [ Handle Shader ]
+  = SubpassInfo { shaderStages     :: [Handle Shader]
                 , descriptors      :: [[Vk.DescriptorSetLayoutBinding]]
                 , vertexBindings   :: [Vk.VertexInputBindingDescription]
                 , vertexAttributes :: [Vk.VertexInputAttributeDescription]
-                , layout           :: Handle RenderPassLayout
-                , subpassIndex     :: Word32
+                , attachmentUsage  :: Vk.SubpassDescription
                 }
 
 -- output
@@ -107,11 +190,11 @@ data Handle a where
   BufferHandle
     :: forall x. Storable x
     => Deferred (BufferInfo x) Buffer -> Handle Buffer
-  RenderPassLayoutHandle
-    :: Deferred RenderPassLayoutInfo (ReleaseKey, RenderPassLayout)
-    -> Handle RenderPassLayout
-  SubpassHandle
-    :: Deferred SubpassInfo (ReleaseKey, Subpass) -> Handle Subpass
+  RenderPassHandle
+    :: Deferred RenderPassInfo (ReleaseKey, RenderPass)
+    -> Handle RenderPass
+  -- SubpassHandle
+  --   :: Deferred SubpassInfo (ReleaseKey, Subpass) -> Handle Subpass
   TextureHandle
     :: forall x. Storable x
     => Deferred (Acquire (TextureInfo x)) Texture
@@ -120,6 +203,6 @@ data Handle a where
 unsafeGetHandle :: MonadIO m => Handle a -> m a
 unsafeGetHandle (ShaderHandle h)           = unsafeGet h
 unsafeGetHandle (BufferHandle h)           = unsafeGet h
-unsafeGetHandle (RenderPassLayoutHandle h) = snd <$> unsafeGet h
-unsafeGetHandle (SubpassHandle h)          = snd <$> unsafeGet h
+unsafeGetHandle (RenderPassHandle h) = snd <$> unsafeGet h
+-- unsafeGetHandle (SubpassHandle h)          = snd <$> unsafeGet h
 unsafeGetHandle (TextureHandle h)          = unsafeGet h
