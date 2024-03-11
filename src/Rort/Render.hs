@@ -830,8 +830,8 @@ acquireSubpass device rp subpassInfo subpassIx = do
            False -- Depth clamp
            False -- Rasterizer discard
            Vk.POLYGON_MODE_FILL -- Polygon mode
-           Vk.CULL_MODE_NONE -- Cull mode
-           Vk.FRONT_FACE_CLOCKWISE -- Facing
+           subpassInfo.cullMode -- Cull mode
+           subpassInfo.frontFace -- Facing
            False -- Depth bias
            0 -- Depth bias constant factor
            0 -- Depth bias clamp

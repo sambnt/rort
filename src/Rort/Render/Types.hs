@@ -142,6 +142,8 @@ data SubpassInfo
                 , vertexBindings   :: [Vk.VertexInputBindingDescription]
                 , vertexAttributes :: [Vk.VertexInputAttributeDescription]
                 , attachmentUsage  :: Vk.SubpassDescription
+                , cullMode         :: Vk.CullModeFlags
+                , frontFace        :: Vk.FrontFace
                 }
 
 -- output

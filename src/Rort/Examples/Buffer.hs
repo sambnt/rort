@@ -104,6 +104,8 @@ main = do
                           ]
                       , attachmentUsage = noUsage
                                           & useColorAttachment 0
+                      , cullMode         = Vk.CULL_MODE_NONE
+                      , frontFace        = Vk.FRONT_FACE_CLOCKWISE
                       }
 
       rp <-

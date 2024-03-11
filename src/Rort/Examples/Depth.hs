@@ -158,6 +158,8 @@ main = do
                                , attachmentUsage  = noUsage
                                                     & useColorAttachment 0
                                                     & useDepthAttachment 1
+                               , cullMode         = Vk.CULL_MODE_NONE
+                               , frontFace        = Vk.FRONT_FACE_CLOCKWISE
                                }
 
       -- TODO: Don't use handles, just use XInfos themselves
