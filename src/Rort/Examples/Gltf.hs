@@ -18,11 +18,10 @@ import qualified Torsor
 import Data.Function ((&))
 import qualified Rort.Allocator as Allocator
 import qualified Chronos
-import Control.Lens ((%~))
 import Data.Acquire (allocateAcquire)
-import Rort.Render.Types (SubpassInfo(..), Draw(..), DrawCallIndexed(..), DrawCall (IndexedDraw), Buffer (Buffer), TextureInfo (TextureInfo), DrawDescriptor (..), RenderPassInfo (..), useColorAttachment, useDepthAttachment, noUsage, AttachmentFormat (..), DrawRenderPass (..), DrawSubpass (..), Attachment (Attachment), Handle)
+import Rort.Render.Types (SubpassInfo(..), Draw(..), Buffer (Buffer), TextureInfo (TextureInfo), DrawDescriptor (..), RenderPassInfo (..), useColorAttachment, useDepthAttachment, noUsage, AttachmentFormat (..), DrawRenderPass (..), DrawSubpass (..), Attachment (Attachment))
 import Rort.Render (createRenderer, shader, buffer, renderPass, submit, texture)
-import Control.Monad (when, forM)
+import Control.Monad (when)
 import Foreign (sizeOf, Word8, pokeArray, castPtr, peekArray)
 import Rort.Window.Types (WindowEvent(..))
 import qualified Data.ByteString.Lazy as BSL
@@ -32,12 +31,7 @@ import qualified Vulkan.Zero as Vk
 import Data.Bits ((.|.))
 import Data.Word (Word16)
 import qualified Text.GLTF.Loader as Gltf
-import Data.Foldable (toList)
-
-data Mesh = Mesh { meshVertexBufferPos :: Handle Buffer
-                 , meshIndexBuffer     :: Handle Buffer
-                 , meshDrawCall        :: DrawCall
-                 }
+import Rort.Util.Gltf (processGltf', Mesh (Mesh), sceneMeshes)
 
 main :: IO ()
 main = do
@@ -72,10 +66,10 @@ main = do
 
       vertShader <-
         shader r Vk.SHADER_STAGE_VERTEX_BIT "main"
-          (liftIO $ BSL.readFile "data/model.vert.spv")
+          (liftIO $ BSL.readFile "data/gltf.vert.spv")
       fragShader <-
         shader r Vk.SHADER_STAGE_FRAGMENT_BIT "main"
-          (liftIO $ BSL.readFile "data/model.frag.spv")
+          (liftIO $ BSL.readFile "data/gltf.frag.spv")
 
       tex <-
         texture r $ do
@@ -95,35 +89,19 @@ main = do
 
       (Right gltf) <- liftIO $
         Gltf.fromJsonFile "data/suzanne.gltf"
-      (meshes :: [Mesh]) <- fmap concat $ forM (Vector.toList $ Gltf.gltfMeshes gltf) $ \mesh ->
-        forM (Vector.toList $ Gltf.meshPrimitives mesh) $ \meshPrimitive -> do
-          let
-            vertices =
-              concatMap toList
-                $ Vector.toList
-                $ Gltf.meshPrimitivePositions meshPrimitive
-              -- <> fmap toList (Gltf.meshPrimitiveTexCoords meshPrimitive)
-            indices = Vector.toList $ Gltf.meshPrimitiveIndices meshPrimitive
+      let (vertices, indices, scene) = processGltf' gltf
 
-          vertexBuffer <-
-            buffer r Vk.BUFFER_USAGE_VERTEX_BUFFER_BIT
-              $ pure ( fromIntegral $ length vertices * sizeOf (undefined :: Float)
-                     , vertices
-                     )
-          indexBuffer <-
-            buffer r Vk.BUFFER_USAGE_INDEX_BUFFER_BIT
-              $ pure ( fromIntegral $ length indices * sizeOf (undefined :: Word16)
-                     , indices
-                     )
+      vertexBuffer <-
+        buffer r Vk.BUFFER_USAGE_VERTEX_BUFFER_BIT
+          $ pure ( fromIntegral $ length vertices * sizeOf (undefined :: Float)
+                 , vertices
+                 )
+      indexBuffer <-
+        buffer r Vk.BUFFER_USAGE_INDEX_BUFFER_BIT
+          $ pure ( fromIntegral $ length indices * sizeOf (undefined :: Word16)
+                 , indices
+                 )
 
-          pure $ Mesh vertexBuffer indexBuffer $
-            IndexedDraw $ DrawCallIndexed
-              { drawCallIndexedIndexCount = fromIntegral $ length indices
-              , drawCallIndexedInstanceCount = 1
-              , drawCallIndexedFirstIndex = 0
-              , drawCallIndexedVertexOffset = 0
-              , drawCallIndexedFirstInstance = 0
-              }
 
       let
         subpass0 = SubpassInfo { shaderStages     = [ vertShader, fragShader ]
@@ -145,7 +123,7 @@ main = do
                                , vertexBindings   =
                                    [ Vk.VertexInputBindingDescription
                                      0 -- first vertex buffer bound
-                                     (fromIntegral $ sizeOf (undefined :: Float) * 3)
+                                     (fromIntegral $ sizeOf (undefined :: Float) * 8)
                                      Vk.VERTEX_INPUT_RATE_VERTEX
                                    ]
                                , vertexAttributes =
@@ -154,11 +132,16 @@ main = do
                                        0 -- binding
                                        Vk.FORMAT_R32G32B32_SFLOAT
                                        0 -- offset
-                                   -- , Vk.VertexInputAttributeDescription
-                                   --     1 -- location (texcoord)
-                                   --     0 -- binding
-                                   --     Vk.FORMAT_R32G32_SFLOAT
-                                   --     (fromIntegral $ sizeOf (undefined :: Float) * 3)
+                                   , Vk.VertexInputAttributeDescription
+                                       1 -- location (texcoord)
+                                       0 -- binding
+                                       Vk.FORMAT_R32G32_SFLOAT
+                                       (fromIntegral $ sizeOf (undefined :: Float) * 3)
+                                   , Vk.VertexInputAttributeDescription
+                                       2 -- location (normal)
+                                       0 -- binding
+                                       Vk.FORMAT_R32G32B32_SFLOAT
+                                       (fromIntegral $ sizeOf (undefined :: Float) * 5)
                                    ]
                                , attachmentUsage  = noUsage
                                                     & useColorAttachment 0
@@ -222,7 +205,7 @@ main = do
 
             let
               draws =
-                flip foldMap meshes $ \(Mesh vertexBuffer indexBuffer drawC) ->
+                flip foldMap (sceneMeshes scene) $ \(Mesh drawC) ->
                   let
                     draw = Draw
                       { drawCall = drawC

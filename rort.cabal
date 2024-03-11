@@ -75,6 +75,7 @@ library
                   , Rort.Render.Types
                   , Rort.Util.Defer
                   , Rort.Util.Wavefront
+                  , Rort.Util.Gltf
                   , Rort.Render.Swapchain
                   , Rort.Render.SwapchainImages
                   , Rort.Render.FramesInFlight

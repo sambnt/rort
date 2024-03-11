@@ -41,7 +41,7 @@ data DrawCall = IndexedDraw DrawCallIndexed
               | PrimitiveDraw DrawCallPrimitive
 
 data Draw
-  = Draw { drawCall           :: DrawCall
+  = Draw { drawCall           :: [DrawCall]
          , drawVertexBuffers  :: [Handle Buffer]
          , drawIndexBuffers   :: [(Handle Buffer, Vk.IndexType)]
          , drawDescriptors    :: [[DrawDescriptor]]

@@ -137,13 +137,14 @@ main = do
           submit ctx r $ \_ -> do
             let
               draw = Draw
-                { drawCall = IndexedDraw $ DrawCallIndexed
-                    { drawCallIndexedIndexCount = 6
-                    , drawCallIndexedInstanceCount = 1
-                    , drawCallIndexedFirstIndex = 0
-                    , drawCallIndexedVertexOffset = 0
-                    , drawCallIndexedFirstInstance = 0
-                    }
+                { drawCall = [ IndexedDraw $ DrawCallIndexed
+                               { drawCallIndexedIndexCount = 6
+                               , drawCallIndexedInstanceCount = 1
+                               , drawCallIndexedFirstIndex = 0
+                               , drawCallIndexedVertexOffset = 0
+                               , drawCallIndexedFirstInstance = 0
+                               }
+                             ]
                 , drawVertexBuffers = [vertexBuffer]
                 , drawIndexBuffers = [(indexBuffer, Vk.INDEX_TYPE_UINT16)]
                 , drawDescriptors = []

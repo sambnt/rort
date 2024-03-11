@@ -198,13 +198,14 @@ main = do
 
             let
               draw = Draw
-                { drawCall = IndexedDraw $ DrawCallIndexed
-                    { drawCallIndexedIndexCount = fromIntegral $ length indices
-                    , drawCallIndexedInstanceCount = 1
-                    , drawCallIndexedFirstIndex = 0
-                    , drawCallIndexedVertexOffset = 0
-                    , drawCallIndexedFirstInstance = 0
-                    }
+                { drawCall = [ IndexedDraw $ DrawCallIndexed
+                               { drawCallIndexedIndexCount = fromIntegral $ length indices
+                               , drawCallIndexedInstanceCount = 1
+                               , drawCallIndexedFirstIndex = 0
+                               , drawCallIndexedVertexOffset = 0
+                               , drawCallIndexedFirstInstance = 0
+                               }
+                             ]
                 , drawVertexBuffers = [vertexBuffer]
                 , drawIndexBuffers = [(indexBuffer, Vk.INDEX_TYPE_UINT32)]
                 , drawDescriptors = [

@@ -95,12 +95,13 @@ main = do
           submit ctx r $ \_ -> do
             let
               draw = Draw
-                { drawCall = PrimitiveDraw $ DrawCallPrimitive
-                             { drawCallPrimitiveFirstVertex = 0
-                             , drawCallPrimitiveFirstInstance = 0
-                             , drawCallPrimitiveInstanceCount = 1
-                             , drawCallPrimitiveVertexCount = 3
-                             }
+                { drawCall = [ PrimitiveDraw $ DrawCallPrimitive
+                               { drawCallPrimitiveFirstVertex = 0
+                               , drawCallPrimitiveFirstInstance = 0
+                               , drawCallPrimitiveInstanceCount = 1
+                               , drawCallPrimitiveVertexCount = 3
+                               }
+                             ]
                 , drawVertexBuffers = []
                 , drawIndexBuffers = []
                 , drawDescriptors = []

@@ -483,13 +483,14 @@ submit ctx r getDraws = do
                     (Vector.fromList sets)
                     mempty -- dynamic offsets
 
-                case drawCall draw of
-                  (IndexedDraw (DrawCallIndexed indexCount instanceCount firstIndex vertexOffset firstInstance)) ->
-                    Vk.cmdDrawIndexed
-                      cmdBuffer indexCount instanceCount firstIndex vertexOffset firstInstance
-                  (PrimitiveDraw (DrawCallPrimitive firstVertex firstInstance instanceCount vertexCount)) ->
-                    Vk.cmdDraw
-                      cmdBuffer vertexCount instanceCount firstVertex firstInstance
+                forM (drawCall draw) $
+                  \case
+                    (IndexedDraw (DrawCallIndexed indexCount instanceCount firstIndex vertexOffset firstInstance)) ->
+                      Vk.cmdDrawIndexed
+                        cmdBuffer indexCount instanceCount firstIndex vertexOffset firstInstance
+                    (PrimitiveDraw (DrawCallPrimitive firstVertex firstInstance instanceCount vertexCount)) ->
+                      Vk.cmdDraw
+                        cmdBuffer vertexCount instanceCount firstVertex firstInstance
 
             Vk.cmdEndRenderPass cmdBuffer
           Vk.endCommandBuffer cmdBuffer
