@@ -21,7 +21,7 @@ import qualified Chronos
 import Control.Lens ((%~))
 import Data.Acquire (allocateAcquire)
 import Rort.Render.Types (SubpassInfo(..), Draw(..), DrawCallIndexed(..), DrawCall (IndexedDraw), Buffer (Buffer), TextureInfo (TextureInfo), DrawDescriptor (..), RenderPassInfo (..), DrawRenderPass (..), DrawSubpass (DrawSubpass), Attachment (Attachment), AttachmentFormat (SwapchainColorFormat), noUsage, useColorAttachment)
-import Rort.Render (createRenderer, shader, buffer, renderPass, submit, texture, evalTexture)
+import Rort.Render (createRenderer, shader, buffer, renderPass, submit, texture)
 import Control.Monad (when)
 import Foreign (sizeOf, Word8, Word16, pokeArray, castPtr, peekArray)
 import Rort.Window.Types (WindowEvent(..))
@@ -83,8 +83,6 @@ main = do
               (fromIntegral h)
               imgDataSize
               imgData
-
-      _ <- evalTexture ctx r tex
 
       let
         vertices :: [Float]
