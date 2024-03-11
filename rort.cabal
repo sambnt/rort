@@ -65,6 +65,7 @@ library
                   , Rort.Examples.Texture
                   , Rort.Examples.Depth
                   , Rort.Examples.Model
+                  , Rort.Examples.Gltf
                   , Rort.Window
                   , Rort.Window.GLFW
                   , Rort.Window.Types
