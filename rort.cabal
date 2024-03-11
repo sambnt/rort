@@ -64,6 +64,7 @@ library
                   , Rort.Examples.Uniform
                   , Rort.Examples.Texture
                   , Rort.Examples.Depth
+                  , Rort.Examples.Model
                   , Rort.Window
                   , Rort.Window.GLFW
                   , Rort.Window.Types
@@ -72,6 +73,7 @@ library
                   , Rort.Vulkan.Context
                   , Rort.Render.Types
                   , Rort.Util.Defer
+                  , Rort.Util.Wavefront
                   , Rort.Render.Swapchain
                   , Rort.Render.SwapchainImages
                   , Rort.Render.FramesInFlight
