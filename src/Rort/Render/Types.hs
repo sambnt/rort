@@ -13,14 +13,22 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
 import Data.Acquire (Acquire)
 import Rort.Util.Defer (Deferred, unsafeGet)
-import Control.Monad.Trans.Resource (ReleaseKey)
-import Control.Monad.IO.Class (MonadIO)
+import Control.Monad.Trans.Resource (ReleaseKey, ResourceT, liftResourceT, MonadResource)
+import Control.Monad.IO.Class (MonadIO, liftIO)
 import Foreign (Storable)
 import qualified Data.Vector as Vector
 import qualified Vulkan.Zero as Vk
 import qualified Vulkan.Core10.Pass as VkPass
 import Rort.Render.Swapchain (Swapchain, vkSurfaceFormat, vkDepthFormat)
 import qualified Vulkan.Extensions.VK_KHR_surface as VkFormat
+import Data.Vector (Vector)
+import Data.Functor.Const (Const)
+import Control.Monad.Reader (ReaderT)
+import Rort.Allocator (Allocator)
+import Control.Monad.State (StateT)
+import Control.Concurrent.STM (TMVar)
+import qualified Control.Concurrent.STM as STM
+import Control.Exception.Safe (onException, mask)
 
 data DrawCallIndexed
   = DrawCallIndexed { drawCallIndexedIndexCount    :: Word32
@@ -42,8 +50,8 @@ data DrawCall = IndexedDraw DrawCallIndexed
 
 data Draw
   = Draw { drawCall           :: [DrawCall]
-         , drawVertexBuffers  :: [Handle Buffer]
-         , drawIndexBuffers   :: [(Handle Buffer, Vk.IndexType)]
+         , drawVertexBuffers  :: [NewHandle Buffer]
+         , drawIndexBuffers   :: [(NewHandle Buffer, Vk.IndexType)]
          , drawDescriptors    :: [[DrawDescriptor]]
          }
 
@@ -189,9 +197,8 @@ data Texture = Texture { img :: Vk.Image
 
 data Handle a where
   ShaderHandle :: Deferred ShaderInfo Shader -> Handle Shader
-  BufferHandle
-    :: forall x. Storable x
-    => Deferred (BufferInfo x) Buffer -> Handle Buffer
+  -- BufferHandle
+  --   :: forall f. Deferred (Acquire (f Buffer)) (f Buffer) -> Handle (f Buffer)
   RenderPassHandle
     :: Deferred RenderPassInfo (ReleaseKey, RenderPass)
     -> Handle RenderPass
@@ -204,7 +211,58 @@ data Handle a where
 
 unsafeGetHandle :: MonadIO m => Handle a -> m a
 unsafeGetHandle (ShaderHandle h)           = unsafeGet h
-unsafeGetHandle (BufferHandle h)           = unsafeGet h
+-- unsafeGetHandle (BufferHandle h)           = unsafeGet h
 unsafeGetHandle (RenderPassHandle h) = snd <$> unsafeGet h
 -- unsafeGetHandle (SubpassHandle h)          = snd <$> unsafeGet h
 unsafeGetHandle (TextureHandle h)          = unsafeGet h
+
+data BufferCopyInfo = BufferCopyInfo { srcBuffer    :: Vk.Buffer
+                                     , dstBuffer    :: Vk.Buffer
+                                     , regions      :: Vector Vk.BufferCopy
+                                     , dstStageMask :: Vk.PipelineStageFlagBits2
+                                     }
+  deriving (Show)
+
+data BufferImageCopyInfo = BufferImageCopyInfo { srcBuffer :: Vk.Buffer
+                                               , dstImage  :: Vk.Image
+                                               , regions   :: Vector Vk.BufferImageCopy
+                                               }
+  deriving (Show)
+
+data BufferCopy = CopyToBuffer BufferCopyInfo
+                | CopyToImage BufferImageCopyInfo
+  deriving (Show)
+
+type Load a = ReaderT Allocator (StateT [BufferCopy] Acquire) a
+
+data NewHandle a =
+  NewHandle { cached        :: ResourceT IO a
+            }
+
+instance Functor NewHandle where
+  fmap f (NewHandle cache) = NewHandle (fmap f cache)
+
+mkHandle :: MonadIO m => ResourceT IO a -> m (NewHandle a)
+mkHandle f = do
+  tvar <- liftIO $ STM.newTMVarIO Nothing
+  pure $ NewHandle $ do
+    mResult <- liftIO $ STM.atomically $ STM.readTMVar tvar
+    case mResult of
+      Nothing -> do
+        mask $ \restore -> do
+          mCurrent <- restore $ liftIO $ STM.atomically $ STM.takeTMVar tvar
+          case mCurrent of
+            Just x  -> do
+              liftIO $ STM.atomically $ STM.putTMVar tvar (Just x)
+              pure x
+            Nothing -> do
+              result <-
+                restore f
+                  `onException` liftIO (STM.atomically $ STM.putTMVar tvar Nothing)
+              liftIO $ STM.atomically $ STM.putTMVar tvar (Just result)
+              pure result
+      Just b ->
+        pure b
+
+handleGet :: MonadResource m => NewHandle a -> m a
+handleGet (NewHandle cache) = liftResourceT cache

@@ -10,15 +10,17 @@ import Control.Monad.Trans.Resource (runResourceT)
 import qualified Data.Vector as Vector
 import qualified Vulkan as Vk
 import Control.Monad.IO.Class (liftIO)
-import Rort.Render.Types (SubpassInfo(..), Draw(..), DrawCallIndexed(..), DrawCall (IndexedDraw), RenderPassInfo (..), DrawRenderPass (..), DrawSubpass (DrawSubpass), Attachment (Attachment), AttachmentFormat (SwapchainColorFormat), noUsage, useColorAttachment)
+import Rort.Render.Types (SubpassInfo(..), Draw(..), DrawCallIndexed(..), DrawCall (IndexedDraw), RenderPassInfo (..), DrawRenderPass (..), DrawSubpass (DrawSubpass), Attachment (Attachment), AttachmentFormat (SwapchainColorFormat), noUsage, useColorAttachment, Buffer (Buffer))
 import Rort.Render (createRenderer, shader, buffer, renderPass, submit)
 import Control.Monad (when)
-import Foreign (sizeOf, Word16)
+import Foreign (sizeOf, Word16, castPtr, pokeArray)
 import Rort.Window.Types (WindowEvent(..))
 import Data.Acquire (allocateAcquire)
 import qualified Vulkan.Zero as Vk
 import qualified Data.ByteString.Lazy as BSL
 import Data.Function ((&))
+import Rort.Allocator (getAllocData)
+import qualified Rort.Render.Load as Load
 
 main :: IO ()
 main = do
@@ -74,11 +76,20 @@ main = do
           sizeOf (undefined :: Word16) * length indices
 
       vertexBuffer <-
-        buffer r Vk.BUFFER_USAGE_VERTEX_BUFFER_BIT
-          $ pure (vertexBufferSize, vertices)
+        buffer ctx r
+          (pure ()) $ const $ do
+            alloc <- Load.allocBuffer Vk.BUFFER_USAGE_VERTEX_BUFFER_BIT vertexBufferSize
+            _ <- Load.withAllocPtr alloc $ \ptr -> do
+              pokeArray (castPtr @() @Float ptr) vertices
+            Load.flushBufferAlloc alloc Vk.BUFFER_USAGE_VERTEX_BUFFER_BIT 0 vertexBufferSize
+            pure $ Buffer (getAllocData alloc) 0 vertexBufferSize
       indexBuffer <-
-        buffer r Vk.BUFFER_USAGE_INDEX_BUFFER_BIT
-          $ pure (indexBufferSize, indices)
+        buffer ctx r (pure ()) $ const $ do
+          alloc <- Load.allocBuffer Vk.BUFFER_USAGE_INDEX_BUFFER_BIT indexBufferSize
+          _ <- Load.withAllocPtr alloc $ \ptr -> do
+            pokeArray (castPtr @() @Word16 ptr) indices
+          Load.flushBufferAlloc alloc Vk.BUFFER_USAGE_INDEX_BUFFER_BIT 0 indexBufferSize
+          pure $ Buffer (getAllocData alloc) 0 indexBufferSize
 
       let
         subpass0 =

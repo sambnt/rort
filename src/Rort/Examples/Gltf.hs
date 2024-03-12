@@ -19,7 +19,7 @@ import Data.Function ((&))
 import qualified Rort.Allocator as Allocator
 import qualified Chronos
 import Data.Acquire (allocateAcquire)
-import Rort.Render.Types (SubpassInfo(..), Draw(..), Buffer (Buffer), TextureInfo (TextureInfo), DrawDescriptor (..), RenderPassInfo (..), useColorAttachment, useDepthAttachment, noUsage, AttachmentFormat (..), DrawRenderPass (..), DrawSubpass (..), Attachment (Attachment))
+import Rort.Render.Types (SubpassInfo(..), Draw(..), Buffer (Buffer), TextureInfo (TextureInfo), DrawDescriptor (..), RenderPassInfo (..), useColorAttachment, useDepthAttachment, noUsage, AttachmentFormat (..), DrawRenderPass (..), DrawSubpass (..), Attachment (Attachment), handleGet )
 import Rort.Render (createRenderer, shader, buffer, renderPass, submit, texture)
 import Control.Monad (when)
 import Foreign (sizeOf, Word8, pokeArray, castPtr, peekArray)
@@ -32,6 +32,8 @@ import Data.Bits ((.|.))
 import Data.Word (Word16)
 import qualified Text.GLTF.Loader as Gltf
 import Rort.Util.Gltf (processGltf', Mesh (Mesh), sceneMeshes)
+import qualified Rort.Render.Load as Load
+import Rort.Allocator (getAllocData)
 
 main :: IO ()
 main = do
@@ -87,21 +89,40 @@ main = do
               imgDataSize
               imgData
 
-      (Right gltf) <- liftIO $
-        Gltf.fromJsonFile "data/suzanne.gltf"
-      let (vertices, indices, scene) = processGltf' gltf
+      bufferHandles <- buffer ctx r
+        -- TODO: Just use acquire instead of separate action?
+        ( do
+            result <- liftIO $ Gltf.fromJsonFile "data/suzanne.gltf"
+            case result of
+              Left _ -> error "Failed to load gltf"
+              Right gltf -> pure gltf
+        ) $ \gltf -> do
+          let
+            (vertices, indices, scene) = processGltf' gltf
+            vertexSize =
+              fromIntegral $ length vertices * sizeOf (undefined :: Float)
+            indexSize =
+              fromIntegral $ length indices * sizeOf (undefined :: Word16)
+          alloc <- Load.allocBuffer Vk.BUFFER_USAGE_VERTEX_BUFFER_BIT vertexSize
+          _ <- Load.withAllocPtr alloc $ \ptr -> do
+             pokeArray (castPtr @() @Float ptr) vertices
+          Load.flushBufferAlloc alloc Vk.BUFFER_USAGE_VERTEX_BUFFER_BIT 0 vertexSize
+          let
+            vertexBuffer = Buffer (getAllocData alloc) 0 vertexSize
 
-      vertexBuffer <-
-        buffer r Vk.BUFFER_USAGE_VERTEX_BUFFER_BIT
-          $ pure ( fromIntegral $ length vertices * sizeOf (undefined :: Float)
-                 , vertices
-                 )
-      indexBuffer <-
-        buffer r Vk.BUFFER_USAGE_INDEX_BUFFER_BIT
-          $ pure ( fromIntegral $ length indices * sizeOf (undefined :: Word16)
-                 , indices
-                 )
+          indexAlloc <- Load.allocBuffer Vk.BUFFER_USAGE_INDEX_BUFFER_BIT indexSize
+          _ <- Load.withAllocPtr indexAlloc $ \ptr -> do
+             pokeArray (castPtr @() @Word16 ptr) indices
+          Load.flushBufferAlloc indexAlloc Vk.BUFFER_USAGE_INDEX_BUFFER_BIT 0 indexSize
+          let
+            indexBuffer = Buffer (getAllocData indexAlloc) 0 indexSize
+          pure (vertexBuffer, indexBuffer, scene)
+      let
+        vertexBuffer = (\(v, _, _) -> v) <$> bufferHandles
+        indexBuffer = (\(_, i, _) -> i) <$> bufferHandles
+        sceneHandle = (\(_, _, s) -> s) <$> bufferHandles
 
+      scene <- handleGet sceneHandle
 
       let
         subpass0 = SubpassInfo { shaderStages     = [ vertShader, fragShader ]

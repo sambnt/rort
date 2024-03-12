@@ -11,7 +11,7 @@ module Rort.Render where
 
 import Rort.Vulkan.Context ( VkContext, VkContext(..), vkGraphicsQueue, vkTransferQueue, vkTransferQueueIx, vkGraphicsQueueIx, vkPresentationQueue )
 import Rort.Render.Swapchain (Swapchain, vkImageViews, vkExtent, throwSwapchainOutOfDate, throwSwapchainSubOptimal, vkSwapchain, SwapchainOutOfDate (SwapchainOutOfDate), vkDepthFormat, vkSwapchainHeight, vkSwapchainWidth)
-import Rort.Render.Types ( Subpass(..), DrawRenderPass(..), Attachment(..), DrawCall(PrimitiveDraw, IndexedDraw), Subpass(Subpass), DrawCallPrimitive(..), SubpassInfo(..), Draw(..), DrawCallIndexed(..), Shader(Shader), pipelineShaderStage, Handle (ShaderHandle, BufferHandle, RenderPassHandle, TextureHandle), ShaderInfo (..), Buffer(Buffer), BufferInfo (..), RenderPass (RenderPass), unsafeGetHandle, TextureInfo (TextureInfo), Texture(Texture), DrawDescriptor (..), AttachmentFormat (..), toAttachmentDescription, DrawRenderPass, DrawSubpass (DrawSubpass), RenderPassInfo(..) )
+import Rort.Render.Types ( handleGet, Subpass(..), DrawRenderPass(..), Attachment(..), DrawCall(PrimitiveDraw, IndexedDraw), Subpass(Subpass), DrawCallPrimitive(..), SubpassInfo(..), Draw(..), DrawCallIndexed(..), Shader(Shader), pipelineShaderStage, Handle (ShaderHandle, RenderPassHandle, TextureHandle), ShaderInfo (..), Buffer(Buffer), BufferInfo (..), RenderPass (RenderPass), unsafeGetHandle, TextureInfo (TextureInfo), Texture(Texture), DrawDescriptor (..), AttachmentFormat (..), toAttachmentDescription, DrawRenderPass, DrawSubpass (DrawSubpass), RenderPassInfo(..), BufferCopy (..), BufferImageCopyInfo (..), BufferCopyInfo(..), NewHandle, mkHandle, Load)
 import qualified Vulkan as Vk
 import qualified Vulkan.Zero as Vk
 import qualified Data.Vector as Vector
@@ -38,6 +38,8 @@ import Rort.Render.SwapchainImages (SwapchainImages, SwapchainImage (SwapchainIm
 import qualified Rort.Render.SwapchainImages as Swapchain
 import Data.Vector (Vector)
 import Data.Function ((&))
+import Control.Monad.State (runStateT)
+import Control.Monad.Reader (runReaderT)
 
 data Renderer
   = Renderer { rendererSwapchain      :: SwapchainImages
@@ -46,23 +48,6 @@ data Renderer
              , rendererDevice         :: Vk.Device
              , rendererPendingWrites  :: TQueue BufferCopy
              }
-
-data BufferCopyInfo = BufferCopyInfo { srcBuffer    :: Vk.Buffer
-                                     , dstBuffer    :: Vk.Buffer
-                                     , regions      :: Vector Vk.BufferCopy
-                                     , dstStageMask :: Vk.PipelineStageFlagBits2
-                                     }
-  deriving (Show)
-
-data BufferImageCopyInfo = BufferImageCopyInfo { srcBuffer :: Vk.Buffer
-                                               , dstImage  :: Vk.Image
-                                               , regions   :: Vector Vk.BufferImageCopy
-                                               }
-  deriving (Show)
-
-data BufferCopy = CopyToBuffer BufferCopyInfo
-                | CopyToImage BufferImageCopyInfo
-  deriving (Show)
 
 recordCopies
   :: MonadResource m
@@ -413,7 +398,7 @@ submit ctx r getDraws = do
               forM_ draws $ \draw -> do
                 (vertexBufs, vertexOffsets)
                   <- drawVertexBuffers draw
-                     & mapM (\(BufferHandle d) -> unsafeGet d)
+                     & mapM handleGet
                      <&> unzip . fmap (\(Buffer buf off _sz) -> (buf, off))
                 unless (null vertexBufs) $
                   Vk.cmdBindVertexBuffers
@@ -421,8 +406,8 @@ submit ctx r getDraws = do
                     0 -- first binding
                     (Vector.fromList vertexBufs)
                     (Vector.fromList vertexOffsets)
-                forM_ (drawIndexBuffers draw) $ \(BufferHandle d, indexType) -> do
-                  (Buffer indexBuf offset _sz) <- unsafeGet d
+                forM_ (drawIndexBuffers draw) $ \(h, indexType) -> do
+                  (Buffer indexBuf offset _sz) <- handleGet h
                   Vk.cmdBindIndexBuffer
                     cmdBuffer
                     indexBuf
@@ -631,15 +616,22 @@ shader _ stage entry code =
   ShaderHandle <$> defer (ShaderInfo stage entry code)
 
 buffer
-  :: (MonadIO m, Storable a)
-  => Renderer
-  -> Vk.BufferUsageFlagBits
-  -- ^ Buffer usage (vertex, index, etc.)
-  -> Acquire (Word64, [a])
-  -- ^ (buffer size, buffer data)
-  -> m (Handle Buffer)
-buffer _ use bufferDat =
-  BufferHandle <$> defer (BufferInfo use bufferDat)
+  :: (MonadResource m, MonadIO m)
+  => VkContext
+  -> Renderer
+  -> Acquire a
+  -> (a -> Load b)
+  -> m (NewHandle b)
+buffer ctx r acquire load =
+  mkHandle $ do
+    (b, copies) <- with acquire $ \a -> do
+      fmap snd $
+        allocateAcquire $
+          flip runStateT [] $
+          flip runReaderT (vkAllocator ctx) $
+            load a
+    liftIO $ STM.atomically $ forM copies $ STM.writeTQueue r.rendererPendingWrites
+    pure b
 
 renderPass
   :: MonadIO m
@@ -910,45 +902,10 @@ evalBuffer
   :: (MonadUnliftIO m, MonadMask m, MonadResource m)
   => VkContext
   -> Renderer
-  -> Handle Buffer
+  -> NewHandle Buffer
   -> m Buffer
-evalBuffer ctx r (BufferHandle d) = do
-  evalEmpty d $ \createInfo ->
-    with createInfo.dat $ \(sz, storable :: [x]) -> do
-      (_relKey, alloc) <- allocateAcquire $
-        withBuffer (vkAllocator ctx) createInfo.usage sz
-      withAllocPtr alloc $ \ptr ->
-        liftIO $ pokeArray (castPtr @() @x ptr) storable
-      _ <- flush (vkAllocator ctx) alloc 0 sz
-      case requiresBufferCopy alloc of
-        Nothing -> pure ()
-        Just (srcBuf, dstBuf) -> do
-          liftIO $ STM.atomically $ STM.writeTQueue r.rendererPendingWrites $
-            CopyToBuffer $
-              BufferCopyInfo { srcBuffer = srcBuf
-                             , dstBuffer = dstBuf
-                             , regions = Vector.singleton $
-                                 Vk.BufferCopy 0 -- src offset
-                                               0 -- dst offset
-                                               sz
-                             , dstStageMask = mkDstStageMask createInfo.usage
-                             }
-      pure $ Buffer (getAllocData alloc) (getAllocOffset alloc) sz
-
-mkDstStageMask :: Vk.BufferUsageFlagBits -> Vk.PipelineStageFlags2
-mkDstStageMask use =
-  let
-    vertexDstStageMask =
-      if use .&. Vk.BUFFER_USAGE_VERTEX_BUFFER_BIT == Vk.BUFFER_USAGE_VERTEX_BUFFER_BIT
-      then (.|. Vk.PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT)
-      else id
-    indexDstStageMask =
-      if use .&. Vk.BUFFER_USAGE_INDEX_BUFFER_BIT == Vk.BUFFER_USAGE_INDEX_BUFFER_BIT
-      then (.|. Vk.PIPELINE_STAGE_2_INDEX_INPUT_BIT)
-      else id
-  in
-    indexDstStageMask . vertexDstStageMask $ Vk.PIPELINE_STAGE_2_NONE
-
+evalBuffer ctx r h = do
+  handleGet h
 
 evalShader
   :: ( MonadUnliftIO m
