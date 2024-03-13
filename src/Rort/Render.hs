@@ -31,7 +31,8 @@ import qualified Data.ByteString.Lazy as BSL
 import Rort.Util.Defer (defer, evalEmpty, eval, unsafeGet)
 import Control.Monad.Trans.Resource (MonadResource, MonadUnliftIO, runResourceT, release)
 import Control.Exception.Safe (MonadMask, try, finally, mask, onException)
-import Rort.Allocator (withBuffer, withAllocPtr, flush, getAllocData, getAllocOffset, requiresBufferCopy, withImage, Allocator, withImageAttachment)
+import Rort.Allocator (withBuffer, withAllocPtr, flush, getAllocData, getAllocOffset, requiresBufferCopy, withImage, Allocator, withImageAttachment, Allocation)
+import Rort.Allocator (withBuffer, withAllocPtr, flush, getAllocData, getAllocOffset, requiresBufferCopy, withImage, Allocator, withImageAttachment, Allocation)
 import Control.Concurrent.STM (TQueue, newTQueueIO, writeTQueue)
 import qualified Control.Concurrent.STM as STM
 import Rort.Render.SwapchainImages (SwapchainImages, SwapchainImage (SwapchainImage))
@@ -616,21 +617,13 @@ shader _ stage entry code =
   ShaderHandle <$> defer (ShaderInfo stage entry code)
 
 buffer
-  :: (MonadResource m, MonadIO m)
-  => VkContext
-  -> Renderer
-  -> Acquire a
-  -> (a -> Load b)
+  :: MonadIO m
+  => Renderer
+  -> Acquire b
   -> m (NewHandle b)
-buffer ctx r acquire load =
+buffer r load =
   mkHandle $ do
-    (b, copies) <- with acquire $ \a -> do
-      fmap snd $
-        allocateAcquire $
-          flip runStateT [] $
-          flip runReaderT (vkAllocator ctx) $
-            load a
-    liftIO $ STM.atomically $ forM copies $ STM.writeTQueue r.rendererPendingWrites
+    b <- fmap snd $ allocateAcquire load
     pure b
 
 renderPass
@@ -989,3 +982,65 @@ finallyPresent device gfxQue presentQue swapchain fs f = do
     $ (throwSwapchainSubOptimal =<<)
     $ throwSwapchainOutOfDate
     $ Vk.queuePresentKHR presentQue presentInfo
+
+
+flushBufferAlloc
+  :: MonadIO m
+  => Renderer
+  -> Allocator
+  -> Allocation Vk.Buffer
+  -> Vk.BufferUsageFlagBits -- TODO: Move this to Allocation
+  -> ("offset" Vk.::: Vk.DeviceSize)
+  -> Vk.DeviceSize
+  -> m ()
+flushBufferAlloc r allocator alloc use offset sz = do
+  _ <- flush allocator alloc offset sz
+  let
+    copies = case requiresBufferCopy alloc of
+      Nothing ->
+        []
+      Just (srcBuf, dstBuf) ->
+        [ CopyToBuffer $
+            BufferCopyInfo { srcBuffer = srcBuf
+                           , dstBuffer = dstBuf
+                           , regions = Vector.singleton $
+                               Vk.BufferCopy 0 -- src offset, TODO: Should this be offset?
+                                             0 -- dst offset
+                                             sz
+                           , dstStageMask = mkDstStageMask use
+                           }
+        ]
+  liftIO $ STM.atomically $ forM_ copies $ STM.writeTQueue (rendererPendingWrites r)
+
+flushImageAlloc
+  :: MonadIO m
+  => Renderer
+  -> Allocator
+  -> Allocation Vk.Image
+  -> Vk.BufferUsageFlagBits -- TODO: Move this to Allocation
+  -> ("offset" Vk.::: Vk.DeviceSize)
+  -> Vk.DeviceSize
+  -> m ()
+flushImageAlloc r allocator alloc use offset sz = do
+  _ <- flush allocator alloc offset sz
+  let
+    copies = case requiresBufferCopy alloc of
+      Nothing ->
+        []
+      Just (srcBuf, dstBuf) ->
+        undefined
+  liftIO $ STM.atomically $ forM_ copies $ STM.writeTQueue (rendererPendingWrites r)
+
+mkDstStageMask :: Vk.BufferUsageFlagBits -> Vk.PipelineStageFlags2
+mkDstStageMask use =
+  let
+    vertexDstStageMask =
+      if use .&. Vk.BUFFER_USAGE_VERTEX_BUFFER_BIT == Vk.BUFFER_USAGE_VERTEX_BUFFER_BIT
+      then (.|. Vk.PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT)
+      else id
+    indexDstStageMask =
+      if use .&. Vk.BUFFER_USAGE_INDEX_BUFFER_BIT == Vk.BUFFER_USAGE_INDEX_BUFFER_BIT
+      then (.|. Vk.PIPELINE_STAGE_2_INDEX_INPUT_BIT)
+      else id
+  in
+    indexDstStageMask . vertexDstStageMask $ Vk.PIPELINE_STAGE_2_NONE

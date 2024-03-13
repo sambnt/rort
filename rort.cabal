@@ -73,7 +73,6 @@ library
                   , Rort.Allocator
                   , Rort.Vulkan.Context
                   , Rort.Render.Types
-                  , Rort.Render.Load
                   , Rort.Util.Defer
                   , Rort.Util.Wavefront
                   , Rort.Util.Gltf
