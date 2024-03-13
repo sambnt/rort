@@ -22,7 +22,7 @@ import Data.Acquire (allocateAcquire)
 import Rort.Render.Types (SubpassInfo(..), Draw(..), Buffer (Buffer), TextureInfo (TextureInfo), DrawDescriptor (..), RenderPassInfo (..), useColorAttachment, useDepthAttachment, noUsage, AttachmentFormat (..), DrawRenderPass (..), DrawSubpass (..), Attachment (Attachment), handleGet )
 import Rort.Render (createRenderer, shader, buffer, renderPass, submit, texture, flushBufferAlloc)
 import Control.Monad (when)
-import Foreign (sizeOf, Word8, pokeArray, castPtr, peekArray)
+import Foreign (sizeOf, Word8, pokeArray, castPtr, peekArray, advancePtr)
 import Rort.Window.Types (WindowEvent(..))
 import qualified Data.ByteString.Lazy as BSL
 import qualified Codec.Image.STB as STB
@@ -101,19 +101,19 @@ main = do
               fromIntegral $ length vertices * sizeOf (undefined :: Float)
             indexSize =
               fromIntegral $ length indices * sizeOf (undefined :: Word16)
-          alloc <- Allocator.withBuffer (vkAllocator ctx) Vk.BUFFER_USAGE_VERTEX_BUFFER_BIT vertexSize
+          alloc <- Allocator.withBuffer (vkAllocator ctx) (Vk.BUFFER_USAGE_INDEX_BUFFER_BIT .|. Vk.BUFFER_USAGE_VERTEX_BUFFER_BIT) (vertexSize + indexSize)
           _ <- Allocator.withAllocPtr alloc $ \ptr -> do
-             liftIO $ pokeArray (castPtr @() @Float ptr) vertices
-          flushBufferAlloc r (vkAllocator ctx) alloc Vk.BUFFER_USAGE_VERTEX_BUFFER_BIT 0 vertexSize
+             let vertexPtr = castPtr @() @Float ptr
+             liftIO $ pokeArray vertexPtr vertices
+             let
+               indexPtr =
+                 castPtr @Float @Word16 $
+                   advancePtr vertexPtr (length vertices)
+             liftIO $ pokeArray indexPtr indices
+          flushBufferAlloc r (vkAllocator ctx) alloc (Vk.BUFFER_USAGE_VERTEX_BUFFER_BIT .|. Vk.BUFFER_USAGE_INDEX_BUFFER_BIT) 0 (vertexSize + indexSize)
           let
             vertexBuffer = Buffer (getAllocData alloc) 0 vertexSize
-
-          indexAlloc <- Allocator.withBuffer (vkAllocator ctx) Vk.BUFFER_USAGE_INDEX_BUFFER_BIT indexSize
-          _ <- Allocator.withAllocPtr indexAlloc $ \ptr -> do
-             liftIO $ pokeArray (castPtr @() @Word16 ptr) indices
-          flushBufferAlloc r (vkAllocator ctx) indexAlloc Vk.BUFFER_USAGE_INDEX_BUFFER_BIT 0 indexSize
-          let
-            indexBuffer = Buffer (getAllocData indexAlloc) 0 indexSize
+            indexBuffer = Buffer (getAllocData alloc) vertexSize indexSize
           pure (vertexBuffer, indexBuffer, scene)
       let
         vertexBuffer = (\(v, _, _) -> v) <$> bufferHandles

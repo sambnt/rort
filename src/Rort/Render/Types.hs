@@ -181,6 +181,7 @@ data Buffer
            , offset :: Word64
            , sz     :: Word64
            }
+  deriving Show
 
 data TextureInfo a
   = TextureInfo { format :: Vk.Format
