@@ -74,9 +74,9 @@ processGltf (accIx, accBuffer, accIndex, scenes) mesh =
 processGltf' :: Gltf.Gltf -> ([Float], [Word16], Scene)
 processGltf' gltf =
   let
-    (_, bufferData, indexData, [scene]) = processGltf (0, [], [], []) gltf
+    (_, bufferData, indexData, scenes) = processGltf (0, [], [], []) gltf
   in
-    (bufferData, indexData, scene)
+    (bufferData, indexData, head scenes)
 
 getPosition :: Vector (V3 Float) -> Word16 -> V3 Float
 getPosition = getIndex (Linear.V3 0 0 0)

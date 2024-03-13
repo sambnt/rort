@@ -22,11 +22,9 @@ import qualified Vulkan.Core10.Pass as VkPass
 import Rort.Render.Swapchain (Swapchain, vkSurfaceFormat, vkDepthFormat)
 import qualified Vulkan.Extensions.VK_KHR_surface as VkFormat
 import Data.Vector (Vector)
-import Data.Functor.Const (Const)
 import Control.Monad.Reader (ReaderT)
 import Rort.Allocator (Allocator)
 import Control.Monad.State (StateT)
-import Control.Concurrent.STM (TMVar)
 import qualified Control.Concurrent.STM as STM
 import Control.Exception.Safe (onException, mask)
 

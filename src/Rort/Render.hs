@@ -11,7 +11,7 @@ module Rort.Render where
 
 import Rort.Vulkan.Context ( VkContext, VkContext(..), vkGraphicsQueue, vkTransferQueue, vkTransferQueueIx, vkGraphicsQueueIx, vkPresentationQueue )
 import Rort.Render.Swapchain (Swapchain, vkImageViews, vkExtent, throwSwapchainOutOfDate, throwSwapchainSubOptimal, vkSwapchain, SwapchainOutOfDate (SwapchainOutOfDate), vkDepthFormat, vkSwapchainHeight, vkSwapchainWidth)
-import Rort.Render.Types ( handleGet, Subpass(..), DrawRenderPass(..), Attachment(..), DrawCall(PrimitiveDraw, IndexedDraw), Subpass(Subpass), DrawCallPrimitive(..), SubpassInfo(..), Draw(..), DrawCallIndexed(..), Shader(Shader), pipelineShaderStage, Handle (ShaderHandle, RenderPassHandle, TextureHandle), ShaderInfo (..), Buffer(Buffer), BufferInfo (..), RenderPass (RenderPass), unsafeGetHandle, TextureInfo (TextureInfo), Texture(Texture), DrawDescriptor (..), AttachmentFormat (..), toAttachmentDescription, DrawRenderPass, DrawSubpass (DrawSubpass), RenderPassInfo(..), BufferCopy (..), BufferImageCopyInfo (..), BufferCopyInfo(..), NewHandle, mkHandle, Load)
+import Rort.Render.Types ( handleGet, Subpass(..), DrawRenderPass(..), Attachment(..), DrawCall(PrimitiveDraw, IndexedDraw), Subpass(Subpass), DrawCallPrimitive(..), SubpassInfo(..), Draw(..), DrawCallIndexed(..), Shader(Shader), pipelineShaderStage, Handle (ShaderHandle, RenderPassHandle, TextureHandle), ShaderInfo (..), Buffer(Buffer), RenderPass (RenderPass), unsafeGetHandle, TextureInfo (TextureInfo), Texture(Texture), DrawDescriptor (..), AttachmentFormat (..), toAttachmentDescription, DrawRenderPass, DrawSubpass (DrawSubpass), RenderPassInfo(..), BufferCopy (..), BufferImageCopyInfo (..), BufferCopyInfo(..), NewHandle, mkHandle)
 import qualified Vulkan as Vk
 import qualified Vulkan.Zero as Vk
 import qualified Data.Vector as Vector
@@ -22,7 +22,7 @@ import Data.Bits ((.|.), (.&.))
 import Control.Monad (forM, forM_, unless)
 import Data.Functor ((<&>), void)
 import Rort.Render.FramesInFlight (FrameSync (..), FramesInFlight, NumFramesInFlight, withFramesInFlight, FrameInFlight (FrameInFlight), withNextFrameInFlight)
-import Data.Word (Word32, Word64)
+import Data.Word (Word32)
 import Control.Monad.IO.Class (MonadIO (..))
 import Foreign (nullPtr, castPtr, pokeArray, Storable)
 import Data.Acquire (Acquire, allocateAcquire, with)
@@ -31,16 +31,12 @@ import qualified Data.ByteString.Lazy as BSL
 import Rort.Util.Defer (defer, evalEmpty, eval, unsafeGet)
 import Control.Monad.Trans.Resource (MonadResource, MonadUnliftIO, runResourceT, release)
 import Control.Exception.Safe (MonadMask, try, finally, mask, onException)
-import Rort.Allocator (withBuffer, withAllocPtr, flush, getAllocData, getAllocOffset, requiresBufferCopy, withImage, Allocator, withImageAttachment, Allocation)
-import Rort.Allocator (withBuffer, withAllocPtr, flush, getAllocData, getAllocOffset, requiresBufferCopy, withImage, Allocator, withImageAttachment, Allocation)
+import Rort.Allocator (withAllocPtr, flush, getAllocData, requiresBufferCopy, withImage, Allocator, withImageAttachment, Allocation)
 import Control.Concurrent.STM (TQueue, newTQueueIO, writeTQueue)
 import qualified Control.Concurrent.STM as STM
 import Rort.Render.SwapchainImages (SwapchainImages, SwapchainImage (SwapchainImage))
 import qualified Rort.Render.SwapchainImages as Swapchain
-import Data.Vector (Vector)
 import Data.Function ((&))
-import Control.Monad.State (runStateT)
-import Control.Monad.Reader (runReaderT)
 
 data Renderer
   = Renderer { rendererSwapchain      :: SwapchainImages
@@ -307,7 +303,7 @@ submit ctx r getDraws = do
       forM_ rpDraw.drawSubpasses $ \(DrawSubpass draws) -> do
         forM_ draws $ \draw -> do
           let buffers = drawVertexBuffers draw <> fmap fst (drawIndexBuffers draw)
-          mapM_ (evalBuffer ctx r) buffers
+          mapM_ evalBuffer buffers
 
           let
             textures = flip foldMap (concat $ drawDescriptors draw) $ \case
@@ -621,7 +617,7 @@ buffer
   => Renderer
   -> Acquire b
   -> m (NewHandle b)
-buffer r load =
+buffer _r load =
   mkHandle $ do
     b <- fmap snd $ allocateAcquire load
     pure b
@@ -892,12 +888,10 @@ acquireSubpass device rp subpassInfo subpassIx = do
   pure $ Subpass pipeline pipelineLayout setLayouts
 
 evalBuffer
-  :: (MonadUnliftIO m, MonadMask m, MonadResource m)
-  => VkContext
-  -> Renderer
-  -> NewHandle Buffer
+  :: MonadResource m
+  => NewHandle Buffer
   -> m Buffer
-evalBuffer ctx r h = do
+evalBuffer h = do
   handleGet h
 
 evalShader
@@ -1021,13 +1015,13 @@ flushImageAlloc
   -> ("offset" Vk.::: Vk.DeviceSize)
   -> Vk.DeviceSize
   -> m ()
-flushImageAlloc r allocator alloc use offset sz = do
+flushImageAlloc r allocator alloc _use offset sz = do
   _ <- flush allocator alloc offset sz
   let
     copies = case requiresBufferCopy alloc of
       Nothing ->
         []
-      Just (srcBuf, dstBuf) ->
+      Just (_srcBuf, _dstBuf) ->
         undefined
   liftIO $ STM.atomically $ forM_ copies $ STM.writeTQueue (rendererPendingWrites r)
 
