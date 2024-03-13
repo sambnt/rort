@@ -21,7 +21,7 @@ import qualified Chronos
 import Control.Lens ((%~))
 import Data.Acquire (allocateAcquire)
 import Rort.Render.Types (SubpassInfo(..), Draw(..), DrawCallIndexed(..), DrawCall (IndexedDraw), Buffer (Buffer), TextureInfo (TextureInfo), DrawDescriptor (..), RenderPassInfo (..), useColorAttachment, useDepthAttachment, noUsage, AttachmentFormat (..), DrawRenderPass (..), DrawSubpass (..), Attachment (Attachment))
-import Rort.Render (createRenderer, shader, buffer, renderPass, submit, texture)
+import Rort.Render (createRenderer, shader, buffer, renderPass, submit, texture, flushBufferAlloc)
 import Control.Monad (when)
 import Foreign (sizeOf, Word8, pokeArray, castPtr, peekArray)
 import Rort.Window.Types (WindowEvent(..))
@@ -90,16 +90,23 @@ main = do
       (vertices, indices) <- liftIO $
         loadObjUnique "data/viking_room.obj"
 
+      let
+        vertexBufferSize = fromIntegral $ length vertices * sizeOf (undefined :: Float)
+        indexBufferSize = fromIntegral $ length indices * sizeOf (undefined :: Word32)
       vertexBuffer <-
-        buffer r Vk.BUFFER_USAGE_VERTEX_BUFFER_BIT
-          $ pure ( fromIntegral $ length vertices * sizeOf (undefined :: Float)
-                 , vertices
-                 )
+        buffer r $ do
+          alloc <- Allocator.withBuffer (vkAllocator ctx) Vk.BUFFER_USAGE_VERTEX_BUFFER_BIT vertexBufferSize
+          _ <- Allocator.withAllocPtr alloc $ \ptr -> do
+            liftIO $ pokeArray (castPtr @() @Float ptr) vertices
+          flushBufferAlloc r (vkAllocator ctx) alloc Vk.BUFFER_USAGE_VERTEX_BUFFER_BIT 0 vertexBufferSize
+          pure $ Buffer (Allocator.getAllocData alloc) 0 vertexBufferSize
       indexBuffer <-
-        buffer r Vk.BUFFER_USAGE_INDEX_BUFFER_BIT
-          $ pure ( fromIntegral $ length indices * sizeOf (undefined :: Word32)
-                 , indices
-                 )
+        buffer r $ do
+          alloc <- Allocator.withBuffer (vkAllocator ctx) Vk.BUFFER_USAGE_INDEX_BUFFER_BIT indexBufferSize
+          _ <- Allocator.withAllocPtr alloc $ \ptr -> do
+            liftIO $ pokeArray (castPtr @() @Word32 ptr) indices
+          flushBufferAlloc r (vkAllocator ctx) alloc Vk.BUFFER_USAGE_INDEX_BUFFER_BIT 0 indexBufferSize
+          pure $ Buffer (Allocator.getAllocData alloc) 0 indexBufferSize
 
       let
         subpass0 = SubpassInfo { shaderStages     = [ vertShader, fragShader ]

@@ -20,7 +20,7 @@ import qualified Chronos
 import Control.Lens ((%~))
 import Data.Acquire (allocateAcquire)
 import Rort.Render.Types (SubpassInfo(..), Draw(..), DrawCallIndexed(..), DrawCall (IndexedDraw), Buffer (Buffer), DrawDescriptor (DescriptorUniform), DrawRenderPass (..), DrawSubpass (DrawSubpass), RenderPassInfo (..), Attachment (..), AttachmentFormat (SwapchainColorFormat), noUsage, useColorAttachment)
-import Rort.Render (createRenderer, shader, buffer, renderPass, submit)
+import Rort.Render (createRenderer, shader, buffer, renderPass, submit, flushBufferAlloc)
 import Control.Monad (when)
 import Foreign (sizeOf, Word16, pokeArray, castPtr)
 import Rort.Window.Types (WindowEvent(..))
@@ -82,11 +82,19 @@ main = do
           sizeOf (undefined :: Word16) * length indices
 
       vertexBuffer <-
-        buffer r Vk.BUFFER_USAGE_VERTEX_BUFFER_BIT
-          $ pure (vertexBufferSize, vertices)
+        buffer r $ do
+          alloc <- Allocator.withBuffer (vkAllocator ctx) Vk.BUFFER_USAGE_VERTEX_BUFFER_BIT vertexBufferSize
+          _ <- Allocator.withAllocPtr alloc $ \ptr -> do
+            liftIO $ pokeArray (castPtr @() @Float ptr) vertices
+          flushBufferAlloc r (vkAllocator ctx) alloc Vk.BUFFER_USAGE_VERTEX_BUFFER_BIT 0 vertexBufferSize
+          pure $ Buffer (Allocator.getAllocData alloc) 0 vertexBufferSize
       indexBuffer <-
-        buffer r Vk.BUFFER_USAGE_INDEX_BUFFER_BIT
-          $ pure (indexBufferSize, indices)
+        buffer r $ do
+          alloc <- Allocator.withBuffer (vkAllocator ctx) Vk.BUFFER_USAGE_INDEX_BUFFER_BIT indexBufferSize
+          _ <- Allocator.withAllocPtr alloc $ \ptr -> do
+            liftIO $ pokeArray (castPtr @() @Word16 ptr) indices
+          flushBufferAlloc r (vkAllocator ctx) alloc Vk.BUFFER_USAGE_INDEX_BUFFER_BIT 0 indexBufferSize
+          pure $ Buffer (Allocator.getAllocData alloc) 0 indexBufferSize
 
       let
         subpass0 =

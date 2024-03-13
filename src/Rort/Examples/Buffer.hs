@@ -20,7 +20,6 @@ import qualified Vulkan.Zero as Vk
 import qualified Data.ByteString.Lazy as BSL
 import Data.Function ((&))
 import qualified Rort.Allocator as Allocator
-import qualified Rort.Render.Load as Load
 
 main :: IO ()
 main = do
