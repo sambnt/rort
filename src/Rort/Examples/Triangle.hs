@@ -30,8 +30,9 @@ main = do
         cfg = VkSettings { requiredExtensions =
                              windowExts <> Vector.fromList []
                          , requiredValidationLayers =
-                             -- Vector.fromList [ "VK_LAYER_KHRONOS_validation" ]
-                             Vector.empty
+                             Vector.fromList [ "VK_LAYER_KHRONOS_validation"
+                                             , "VK_LAYER_RENDERDOC_Capture"
+                                             ]
                          , applicationInfo =
                              Vk.ApplicationInfo
                                (Just "Example: Triangle")  -- application name
@@ -68,7 +69,7 @@ main = do
                   )
       let
         renderStep = do
-          submit ctx r $ do
+          submit ctx r $ \_swapchain -> do
             let
               draw = Draw
                 { drawCall = PrimitiveDraw $ DrawCallPrimitive
@@ -79,6 +80,7 @@ main = do
                              }
                 , drawVertexBuffers = []
                 , drawIndexBuffers = []
+                , drawUniformBuffers = []
                 , drawSubpass = subpass0
                 }
             pure [draw]
