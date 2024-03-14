@@ -7,14 +7,14 @@
 
 module Rort.Render where
 
-import Rort.Vulkan.Context ( VkContext, VkContext(..), vkGraphicsQueue, vkPresentationQueue )
+import Rort.Vulkan.Context ( VkContext, VkContext(..), vkGraphicsQueue, vkPresentationQueue, vkTransferQueue, vkTransferQueueIx, vkGraphicsQueueIx )
 import Rort.Render.Swapchain (Swapchain, vkSurfaceFormat, vkImageViews, vkExtent, throwSwapchainOutOfDate, throwSwapchainSubOptimal, vkSwapchain, SwapchainOutOfDate (SwapchainOutOfDate))
 import Rort.Render.Types ( DrawCall(PrimitiveDraw, IndexedDraw), Subpass(Subpass), DrawCallPrimitive(..), SubpassInfo(..), Draw(..), DrawCallIndexed(..), Shader(Shader), pipelineShaderStage, Handle (ShaderHandle, BufferHandle, RenderPassLayoutHandle, SubpassHandle), ShaderInfo (..), Buffer(Buffer), BufferInfo (..), RenderPassLayout (RenderPassLayout), RenderPassLayoutInfo (RenderPassLayoutInfo), unsafeGetHandle )
 import qualified Vulkan as Vk
 import qualified Vulkan.Zero as Vk
 import qualified Data.Vector as Vector
 import qualified Vulkan.Core10.FundamentalTypes as Extent2D (Extent2D(width, height))
-import Rort.Vulkan (withVkRenderPass, withVkGraphicsPipelines, withVkFramebuffer, withVkPipelineLayout, withVkShaderModule, withVkCommandBuffers)
+import Rort.Vulkan (withVkRenderPass, withVkGraphicsPipelines, withVkFramebuffer, withVkPipelineLayout, withVkShaderModule, withVkCommandBuffers, withSemaphore)
 import qualified Vulkan.Extensions.VK_KHR_surface as VkFormat
 import qualified Vulkan.CStruct.Extends as Vk
 import Data.Bits ((.|.), (.&.))
@@ -57,11 +57,116 @@ recordBufferCopies
   :: MonadResource m
   => VkContext
   -> Vk.CommandPool
+  -> Vk.CommandBuffer
   -> [BufferCopyInfo]
   -> m ()
-recordBufferCopies ctx cmdPool [] = pure ()
-recordBufferCopies ctx cmdPool bufferCopyInfos = do
-  undefined
+recordBufferCopies _ctx _cmdPool _cmdBuffer [] = pure ()
+recordBufferCopies ctx cmdPool cmdBuffer bufferCopyInfos = do
+  forM_ bufferCopyInfos $ \copy ->
+    Vk.cmdCopyBuffer cmdBuffer copy.srcBuffer copy.dstBuffer copy.regions
+
+  if vkGraphicsQueue ctx == vkTransferQueue ctx
+  then do
+    let
+      barriers = flip foldMap bufferCopyInfos $ \copy ->
+        [ Vk.MemoryBarrier2
+            Vk.PIPELINE_STAGE_2_TRANSFER_BIT_KHR -- src stage mask
+            Vk.ACCESS_2_MEMORY_WRITE_BIT_KHR -- src access mask
+            copy.dstStageMask
+            Vk.ACCESS_2_MEMORY_READ_BIT_KHR -- dst access mask
+        ]
+
+      dependencyInfo = Vk.DependencyInfo
+        Vk.zero                    -- dependency flags
+        (Vector.fromList barriers) -- memory barriers
+        Vector.empty               -- buffer memory barriers
+        Vector.empty               -- image memory barriers
+
+    Vk.cmdPipelineBarrier2KHR cmdBuffer dependencyInfo
+  else do
+    _ <- error "Separate graphics and transfer queue not implemented!"
+    let
+      gfxWaitSemaphoreInfo = Vk.SemaphoreCreateInfo () Vk.zero
+
+    (_, gfxWaitSemaphore) <- allocateAcquire $
+      withSemaphore (vkDevice ctx) gfxWaitSemaphoreInfo
+
+    (_, cmdBuffers) <-
+      allocateAcquire $ withVkCommandBuffers
+        (vkDevice ctx)
+        $ Vk.CommandBufferAllocateInfo
+            cmdPool
+            -- Primary = can be submitted to queue for execution, can't be
+            -- called by other command buffers.
+            Vk.COMMAND_BUFFER_LEVEL_PRIMARY
+            1 -- count
+    let transferCmdBuffer = Vector.head cmdBuffers
+
+    Vk.beginCommandBuffer transferCmdBuffer
+      $ Vk.CommandBufferBeginInfo
+          ()
+          Vk.zero
+          Nothing -- Inheritance info
+
+    let
+      barriers = flip foldMap bufferCopyInfos $ \copy ->
+        flip foldMap copy.regions $ \region ->
+          [ Vk.BufferMemoryBarrier2
+              Vk.PIPELINE_STAGE_2_TRANSFER_BIT_KHR -- src stage mask
+              Vk.ACCESS_2_MEMORY_WRITE_BIT_KHR -- src access mask
+              Vk.zero -- dst stage mask
+              Vk.zero -- dst access mask
+              (vkTransferQueueIx ctx) -- src queue family ix
+              (vkGraphicsQueueIx ctx) -- dst queue family ix
+              copy.dstBuffer -- buffer
+              region.dstOffset -- offset
+              region.size -- size
+          ]
+
+    let
+      dependencyInfo = Vk.DependencyInfo
+        Vk.zero -- dependency flags
+        Vector.empty -- memory barriers
+        (Vector.fromList barriers) -- buffer memory barriers
+        Vector.empty -- image memory barriers
+
+    Vk.cmdPipelineBarrier2KHR transferCmdBuffer dependencyInfo
+
+    Vk.endCommandBuffer transferCmdBuffer
+
+    let
+      submitInfo = Vk.SubmitInfo
+        ()
+        mempty -- wait semaphores
+        mempty -- wait dst stage mask
+        (Vector.singleton $ Vk.commandBufferHandle transferCmdBuffer) -- commandBuffers
+        (Vector.singleton gfxWaitSemaphore) -- signal semaphores
+
+    Vk.queueSubmit (vkTransferQueue ctx) (Vector.singleton $ Vk.SomeStruct submitInfo) Vk.NULL_HANDLE
+
+    let
+      barriers2 = flip foldMap bufferCopyInfos $ \copy ->
+        flip foldMap copy.regions $ \region ->
+          [ Vk.BufferMemoryBarrier2
+              Vk.PIPELINE_STAGE_2_TRANSFER_BIT_KHR -- src stage mask
+              Vk.ACCESS_2_MEMORY_WRITE_BIT_KHR -- src access mask
+              Vk.zero -- dst stage mask
+              Vk.zero -- dst access mask
+              (vkTransferQueueIx ctx) -- src queue family ix
+              (vkGraphicsQueueIx ctx) -- dst queue family ix
+              copy.dstBuffer -- buffer
+              region.dstOffset -- offset
+              region.size -- size
+          ]
+
+    let
+      dependencyInfo2 = Vk.DependencyInfo
+        Vk.zero -- dependency flags
+        Vector.empty -- memory barriers
+        (Vector.fromList barriers2) -- buffer memory barriers
+        Vector.empty -- image memory barriers
+
+    Vk.cmdPipelineBarrier2KHR cmdBuffer dependencyInfo2
 
 createRenderer
   :: MonadResource m
@@ -104,10 +209,6 @@ submit ctx r getDraws = do
       (vkDevice ctx)
       (rendererFramesInFlight r)
       $ \(FrameInFlight fs _descPool cmdPool) -> runResourceT $ do
-        mask $ \restore -> do
-          bufferCopies <- liftIO $ STM.atomically $ STM.flushTQueue r.rendererPendingWrites
-          restore (recordBufferCopies ctx cmdPool bufferCopies)
-            `onException` liftIO (STM.atomically $ forM_ bufferCopies $ STM.writeTQueue r.rendererPendingWrites)
         (_, cmdBuffers) <-
           allocateAcquire $ withVkCommandBuffers
             (vkDevice ctx)
@@ -124,6 +225,11 @@ submit ctx r getDraws = do
                 ()
                 Vk.zero
                 Nothing -- Inheritance info
+
+          mask $ \restore -> do
+            bufferCopies <- liftIO $ STM.atomically $ STM.flushTQueue r.rendererPendingWrites
+            restore (recordBufferCopies ctx cmdPool cmdBuffer bufferCopies)
+              `onException` liftIO (STM.atomically $ forM_ bufferCopies $ STM.writeTQueue r.rendererPendingWrites)
           forM_ draws $ \draw -> do
             let
               (SubpassHandle h) = draw.drawSubpass
