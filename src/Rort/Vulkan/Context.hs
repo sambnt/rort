@@ -26,17 +26,17 @@ import Rort.Allocator (Allocator)
 import qualified Rort.Allocator as Allocator
 import Data.Acquire (Acquire, mkAcquire)
 
-data VkContext = VkContext { vkInstance           :: Vk.Instance
-                           , vkSurface            :: Vk.SurfaceKHR
-                           , vkPhysicalDevice     :: Vk.PhysicalDevice
-                           , vkDevice             :: Vk.Device
-                           , vkQueueFamilies      :: QueueFamilies
-                           , vkMSAASamples        :: Vk.SampleCountFlagBits
-                           , vkGetFramebufferSize :: IO (Int, Int)
-                           , vkPresentationQueue  :: Vk.Queue
-                           , vkGraphicsQueue      :: Vk.Queue
-                           , vkTransferQueue      :: Vk.Queue
-                           , vkAllocator          :: Allocator
+data VkContext = VkContext { vkInstance              :: Vk.Instance
+                           , vkSurface               :: Vk.SurfaceKHR
+                           , vkPhysicalDevice        :: Vk.PhysicalDevice
+                           , vkDevice                :: Vk.Device
+                           , vkQueueFamilies         :: QueueFamilies
+                           , vkMSAASamples           :: Vk.SampleCountFlagBits
+                           , vkGetFramebufferSize    :: IO (Int, Int)
+                           , vkPresentationQueueInfo :: (Word32, Vk.Queue)
+                           , vkGraphicsQueueInfo     :: (Word32, Vk.Queue)
+                           , vkTransferQueueInfo     :: (Word32, Vk.Queue)
+                           , vkAllocator             :: Allocator
                            }
 
 data VkSettings
@@ -58,6 +58,24 @@ data SwapchainSupportDetails
                             , swapchainSupportPresentModes :: Vector Vk.PresentModeKHR
                             }
   deriving (Show)
+
+vkGraphicsQueue :: VkContext -> Vk.Queue
+vkGraphicsQueue = snd . vkGraphicsQueueInfo
+
+vkGraphicsQueueIx :: VkContext -> Word32
+vkGraphicsQueueIx = fst . vkGraphicsQueueInfo
+
+vkTransferQueue :: VkContext -> Vk.Queue
+vkTransferQueue = snd . vkTransferQueueInfo
+
+vkTransferQueueIx :: VkContext -> Word32
+vkTransferQueueIx = fst . vkTransferQueueInfo
+
+vkPresentationQueue :: VkContext -> Vk.Queue
+vkPresentationQueue = snd . vkPresentationQueueInfo
+
+vkPresentationQueueIx :: VkContext -> Word32
+vkPresentationQueueIx = fst . vkPresentationQueueInfo
 
 withVkContext
   :: VkSettings
@@ -101,33 +119,36 @@ withVkContext cfg win = do
       props <- Vk.getPhysicalDeviceProperties physicalDevice
       let samples = getMaxUsableSampleCount props
 
+      let gfxQueIx = NE.head $ graphicsQueueFamilies queFamilies
       gfxQueue <-
         liftIO $ Vk.getDeviceQueue
           logicalDevice
-          (NE.head $ graphicsQueueFamilies queFamilies)
+          gfxQueIx
           0
+      let presentQueIx = NE.head $ presentationQueueFamilies queFamilies
       presentQueue <-
         liftIO $ Vk.getDeviceQueue
           logicalDevice
-          (NE.head $ presentationQueueFamilies queFamilies)
+          presentQueIx
           0
+      let transferQueIx = NE.head $ transferQueueFamilies queFamilies
       transferQueue <-
         liftIO $ Vk.getDeviceQueue
           logicalDevice
-          (NE.head $ presentationQueueFamilies queFamilies)
+          transferQueIx
           0
 
-      pure $ VkContext { vkInstance           = inst
-                       , vkSurface            = surface
-                       , vkPhysicalDevice     = physicalDevice
-                       , vkQueueFamilies      = queFamilies
-                       , vkDevice             = logicalDevice
-                       , vkMSAASamples        = samples
-                       , vkGetFramebufferSize = getFramebufferSize win
-                       , vkPresentationQueue  = presentQueue
-                       , vkGraphicsQueue      = gfxQueue
-                       , vkTransferQueue      = transferQueue
-                       , vkAllocator          = allocator
+      pure $ VkContext { vkInstance              = inst
+                       , vkSurface               = surface
+                       , vkPhysicalDevice        = physicalDevice
+                       , vkQueueFamilies         = queFamilies
+                       , vkDevice                = logicalDevice
+                       , vkMSAASamples           = samples
+                       , vkGetFramebufferSize    = getFramebufferSize win
+                       , vkPresentationQueueInfo = (presentQueIx, presentQueue)
+                       , vkGraphicsQueueInfo     = (gfxQueIx, gfxQueue)
+                       , vkTransferQueueInfo     = (transferQueIx, transferQueue)
+                       , vkAllocator             = allocator
                        }
 withInstance
   :: Vk.InstanceCreateInfo '[]

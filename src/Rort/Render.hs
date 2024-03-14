@@ -7,7 +7,7 @@
 
 module Rort.Render where
 
-import Rort.Vulkan.Context ( VkContext, VkContext(..) )
+import Rort.Vulkan.Context ( VkContext, VkContext(..), vkGraphicsQueue, vkPresentationQueue )
 import Rort.Render.Swapchain (Swapchain, vkSurfaceFormat, vkImageViews, vkExtent, throwSwapchainOutOfDate, throwSwapchainSubOptimal, vkSwapchain, SwapchainOutOfDate (SwapchainOutOfDate))
 import Rort.Render.Types ( DrawCall(PrimitiveDraw, IndexedDraw), Subpass(Subpass), DrawCallPrimitive(..), SubpassInfo(..), Draw(..), DrawCallIndexed(..), Shader(Shader), pipelineShaderStage, Handle (ShaderHandle, BufferHandle, RenderPassLayoutHandle, SubpassHandle), ShaderInfo (..), Buffer(Buffer), BufferInfo (..), RenderPassLayout (RenderPassLayout), RenderPassLayoutInfo (RenderPassLayoutInfo), unsafeGetHandle )
 import qualified Vulkan as Vk
