@@ -143,7 +143,7 @@ withBuffer allocator usage sz = do
         ()
         Vk.zero
         sz
-        usage
+        (usage .|. Vk.BUFFER_USAGE_TRANSFER_DST_BIT)
         Vk.SHARING_MODE_EXCLUSIVE -- TODO: gfx/transfer queue
         Vector.empty -- queue family indices, ignored.
 
