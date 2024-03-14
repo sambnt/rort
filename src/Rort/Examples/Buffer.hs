@@ -123,7 +123,7 @@ main = do
                 , drawVertexBuffers = [vertexBuffer]
                 , drawIndexBuffers = [(indexBuffer, Vk.INDEX_TYPE_UINT16)]
                 , drawSubpass = subpass0
-                , drawUniformBuffers = []
+                , drawDescriptors = []
                 }
             pure [draw]
 

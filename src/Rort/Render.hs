@@ -4,17 +4,19 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE LambdaCase #-}
 
 module Rort.Render where
 
 import Rort.Vulkan.Context ( VkContext, VkContext(..), vkGraphicsQueue, vkPresentationQueue, vkTransferQueue, vkTransferQueueIx, vkGraphicsQueueIx )
 import Rort.Render.Swapchain (Swapchain, vkSurfaceFormat, vkImageViews, vkExtent, throwSwapchainOutOfDate, throwSwapchainSubOptimal, vkSwapchain, SwapchainOutOfDate (SwapchainOutOfDate))
-import Rort.Render.Types ( DrawCall(PrimitiveDraw, IndexedDraw), Subpass(Subpass), DrawCallPrimitive(..), SubpassInfo(..), Draw(..), DrawCallIndexed(..), Shader(Shader), pipelineShaderStage, Handle (ShaderHandle, BufferHandle, RenderPassLayoutHandle, SubpassHandle), ShaderInfo (..), Buffer(Buffer), BufferInfo (..), RenderPassLayout (RenderPassLayout), RenderPassLayoutInfo (RenderPassLayoutInfo), unsafeGetHandle )
+import Rort.Render.Types ( DrawCall(PrimitiveDraw, IndexedDraw), Subpass(Subpass), DrawCallPrimitive(..), SubpassInfo(..), Draw(..), DrawCallIndexed(..), Shader(Shader), pipelineShaderStage, Handle (ShaderHandle, BufferHandle, RenderPassLayoutHandle, SubpassHandle, TextureHandle), ShaderInfo (..), Buffer(Buffer), BufferInfo (..), RenderPassLayout (RenderPassLayout), RenderPassLayoutInfo (RenderPassLayoutInfo), unsafeGetHandle, TextureInfo (..), Texture(..), DrawDescriptor (..))
 import qualified Vulkan as Vk
 import qualified Vulkan.Zero as Vk
 import qualified Data.Vector as Vector
 import qualified Vulkan.Core10.FundamentalTypes as Extent2D (Extent2D(width, height))
-import Rort.Vulkan (withVkDescriptorSetLayout, withVkRenderPass, withVkGraphicsPipelines, withVkFramebuffer, withVkPipelineLayout, withVkShaderModule, withVkCommandBuffers, withSemaphore)
+import Rort.Vulkan (withImageView, withSampler, withVkDescriptorSetLayout, withVkRenderPass, withVkGraphicsPipelines, withVkFramebuffer, withVkPipelineLayout, withVkShaderModule, withVkCommandBuffers, withSemaphore)
 import qualified Vulkan.Extensions.VK_KHR_surface as VkFormat
 import qualified Vulkan.CStruct.Extends as Vk
 import Data.Bits ((.|.), (.&.))
@@ -30,7 +32,7 @@ import qualified Data.ByteString.Lazy as BSL
 import Rort.Util.Defer (defer, evalEmpty, getSeed, eval, unsafeGet)
 import Control.Monad.Trans.Resource (MonadResource, MonadUnliftIO, runResourceT, release)
 import Control.Exception.Safe (MonadMask, try, finally, mask, onException)
-import Rort.Allocator (withBuffer, withAllocPtr, flush, getAllocBuffer, getAllocOffset, requiresBufferCopy)
+import Rort.Allocator (withImage, withBuffer, withAllocPtr, flush, getAllocData, getAllocOffset, requiresBufferCopy)
 import Control.Concurrent.STM (TQueue, newTQueueIO, writeTQueue)
 import qualified Control.Concurrent.STM as STM
 import Rort.Render.SwapchainImages (SwapchainImages, SwapchainImage (SwapchainImage))
@@ -44,7 +46,7 @@ data Renderer
              , rendererLayouts        :: TQueue (Handle RenderPassLayout)
              , rendererPasses         :: TQueue (Handle Subpass)
              , rendererDevice         :: Vk.Device
-             , rendererPendingWrites  :: TQueue BufferCopyInfo
+             , rendererPendingWrites  :: TQueue BufferCopy
              }
 
 data BufferCopyInfo = BufferCopyInfo { srcBuffer    :: Vk.Buffer
@@ -52,6 +54,131 @@ data BufferCopyInfo = BufferCopyInfo { srcBuffer    :: Vk.Buffer
                                      , regions      :: Vector Vk.BufferCopy
                                      , dstStageMask :: Vk.PipelineStageFlagBits2
                                      }
+  deriving (Show)
+
+data BufferImageCopyInfo = BufferImageCopyInfo { srcBuffer :: Vk.Buffer
+                                               , dstImage  :: Vk.Image
+                                               , regions   :: Vector Vk.BufferImageCopy
+                                               }
+  deriving (Show)
+
+data BufferCopy = CopyToBuffer BufferCopyInfo
+                | CopyToImage BufferImageCopyInfo
+  deriving (Show)
+
+recordCopies
+  :: MonadResource m
+  => VkContext
+  -> Vk.CommandPool
+  -> Vk.CommandBuffer
+  -> [BufferCopy]
+  -> m ()
+recordCopies ctx cmdPool cmdBuffer xs = do
+  let
+    (bufferCopies, imgCopies) =
+        foldl (\(accBuf, accImg) ->
+                 \case
+                   CopyToBuffer bufCopy -> (bufCopy:accBuf, accImg)
+                   CopyToImage imgCopy -> (accBuf, imgCopy:accImg)
+              ) mempty xs
+
+  recordBufferCopies ctx cmdPool cmdBuffer bufferCopies
+  recordBufferImageCopies ctx cmdPool cmdBuffer imgCopies
+
+recordBufferImageCopies
+  :: MonadResource m
+  => VkContext
+  -> Vk.CommandPool
+  -> Vk.CommandBuffer
+  -> [BufferImageCopyInfo]
+  -> m ()
+recordBufferImageCopies _ctx _cmdPool _cmdBuffer [] = pure ()
+recordBufferImageCopies ctx _cmdPool cmdBuffer bufferImageCopyInfos = do
+  let
+    preCopyMemoryBarriers = flip foldMap bufferImageCopyInfos $ \copy ->
+      let
+        imgRange =
+          Vk.ImageSubresourceRange
+            Vk.IMAGE_ASPECT_COLOR_BIT
+            0 -- baseMipLevel
+            1 -- levelCount
+            0 -- baseArrayLayer
+            1 -- layerCount
+
+        preCopyMemoryBarrier =
+          Vk.ImageMemoryBarrier2
+            ()
+            Vk.zero -- src stage mask
+            Vk.zero -- src access mask
+            Vk.PIPELINE_STAGE_2_TRANSFER_BIT_KHR -- dst stage mask
+            Vk.ACCESS_2_MEMORY_WRITE_BIT -- dst access mask
+            Vk.IMAGE_LAYOUT_UNDEFINED -- old image layout
+            Vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL -- new image layout
+            Vk.QUEUE_FAMILY_IGNORED -- srcQueueFamilyIx
+            Vk.QUEUE_FAMILY_IGNORED -- dstQueueFamilyIx
+            copy.dstImage -- image
+            imgRange -- subresource range
+      in
+        [preCopyMemoryBarrier]
+
+    preCopyDependencyInfo = Vk.DependencyInfo
+      Vk.zero -- dependency flags
+      Vector.empty -- memory barriers
+      Vector.empty -- buffer memory barriers
+      -- image memory barriers
+      (Vector.fromList $ Vk.SomeStruct <$> preCopyMemoryBarriers)
+
+  Vk.cmdPipelineBarrier2KHR cmdBuffer preCopyDependencyInfo
+
+  forM_ bufferImageCopyInfos $ \copy -> do
+    Vk.cmdCopyBufferToImage
+      cmdBuffer
+      copy.srcBuffer
+      copy.dstImage
+      Vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
+      copy.regions
+
+  if vkGraphicsQueue ctx == vkTransferQueue ctx
+  then do
+    let
+      postCopyMemBarriers = flip foldMap bufferImageCopyInfos $ \copy ->
+        let
+          imgRange =
+            Vk.ImageSubresourceRange
+              Vk.IMAGE_ASPECT_COLOR_BIT
+              0 -- baseMipLevel
+              1 -- levelCount
+              0 -- baseArrayLayer
+              1 -- layerCount
+
+          postCopyMemoryBarrier =
+            Vk.ImageMemoryBarrier2
+              ()
+              Vk.PIPELINE_STAGE_2_TRANSFER_BIT -- src stage mask
+              Vk.ACCESS_2_TRANSFER_WRITE_BIT_KHR -- src access mask
+              Vk.PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT_KHR -- dst stage mask
+              Vk.ACCESS_2_SHADER_READ_BIT -- dst access mask
+              Vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL -- old image layout
+              Vk.IMAGE_LAYOUT_READ_ONLY_OPTIMAL -- new image layout
+              Vk.QUEUE_FAMILY_IGNORED -- srcQueueFamilyIx
+              Vk.QUEUE_FAMILY_IGNORED -- dstQueueFamilyIx
+              copy.dstImage -- image
+              imgRange -- subresource range
+        in
+          [postCopyMemoryBarrier]
+
+    let
+      postCopyDependencyInfo = Vk.DependencyInfo
+        Vk.zero -- dependency flags
+        Vector.empty -- memory barriers
+        Vector.empty -- buffer memory barriers
+        (Vector.fromList $ Vk.SomeStruct <$> postCopyMemBarriers) -- image memory barriers
+
+    Vk.cmdPipelineBarrier2KHR cmdBuffer postCopyDependencyInfo
+  else
+    error "Separate transfer and graphics queue for buffer image copy not implemented!"
+
+
 
 recordBufferCopies
   :: MonadResource m
@@ -213,6 +340,11 @@ submit ctx r getDraws = do
       _ <- evalSubpass (vkDevice ctx) swapchain s
       let buffers = drawVertexBuffers draw <> fmap fst (drawIndexBuffers draw)
       mapM_ (evalBuffer ctx r) buffers
+
+      forM (concat $ drawDescriptors draw) $ \case
+          (DescriptorUniform _) -> pure ()
+          (DescriptorTexture t) -> void $ evalTexture ctx r t
+
     withNextFrameInFlight
       (vkDevice ctx)
       (rendererFramesInFlight r)
@@ -235,9 +367,9 @@ submit ctx r getDraws = do
                 Nothing -- Inheritance info
 
           mask $ \restore -> do
-            bufferCopies <- liftIO $ STM.atomically $ STM.flushTQueue r.rendererPendingWrites
-            restore (recordBufferCopies ctx cmdPool cmdBuffer bufferCopies)
-              `onException` liftIO (STM.atomically $ forM_ bufferCopies $ STM.writeTQueue r.rendererPendingWrites)
+            copies <- liftIO $ STM.atomically $ STM.flushTQueue r.rendererPendingWrites
+            restore (recordCopies ctx cmdPool cmdBuffer copies)
+              `onException` liftIO (STM.atomically $ forM_ copies $ STM.writeTQueue r.rendererPendingWrites)
           forM_ draws $ \draw -> do
             let
               (SubpassHandle h) = draw.drawSubpass
@@ -313,26 +445,48 @@ submit ctx r getDraws = do
                       ()
                       descPool
                       (Vector.fromList setLayouts)
-              let
-                writes = flip foldMap (zip sets (drawUniformBuffers draw)) $
-                  \(set, Buffer buf off sz) ->
-                    [ Vk.WriteDescriptorSet
-                        ()
-                        set -- dst set
-                        0 -- dst binding
-                        0 -- dst array element
-                        1 -- descriptor count
-                        Vk.DESCRIPTOR_TYPE_UNIFORM_BUFFER
-                        mempty -- image info
-                        -- buffer info
-                        ( Vector.singleton $
-                            Vk.DescriptorBufferInfo
-                              buf
-                              off -- offset
-                              sz
-                        )
-                        mempty -- texel buffer view
-                    ]
+              writes <-
+                fmap concat $ forM (zip sets (drawDescriptors draw)) $ \(set, ds) ->
+                    fmap concat $ forM (zip [0..] ds) $ \(ix, descriptor) ->
+                      case descriptor of
+                        (DescriptorUniform (Buffer buf off sz)) ->
+                          pure [ Vk.WriteDescriptorSet
+                              ()
+                              set -- dst set
+                              ix -- dst binding
+                              0 -- dst array element
+                              1 -- descriptor count
+                              Vk.DESCRIPTOR_TYPE_UNIFORM_BUFFER
+                              mempty -- image info
+                              -- buffer info
+                              ( Vector.singleton $
+                                  Vk.DescriptorBufferInfo
+                                    buf
+                                    off -- offset
+                                    sz
+                              )
+                              mempty -- texel buffer view
+                          ]
+                        (DescriptorTexture (TextureHandle th)) -> do
+                          (Texture _img iv sample ) <- unsafeGet th
+                          pure [ Vk.WriteDescriptorSet
+                                   ()
+                                   set -- dst set
+                                   ix -- dst binding
+                                   0 -- dst array element
+                                   1 -- descriptor count
+                                   Vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+                                   -- image info
+                                   ( Vector.singleton $
+                                       Vk.DescriptorImageInfo
+                                         sample
+                                         iv
+                                         Vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                                   )
+                                   mempty -- buffer info
+                                   mempty -- texel buffer view
+                               ]
+
 
               liftIO $ Vk.updateDescriptorSets (vkDevice ctx)
                 (fmap Vk.SomeStruct . Vector.fromList $ writes)
@@ -414,6 +568,119 @@ subpass r subpassInfo = do
   h <- SubpassHandle <$> defer subpassInfo
   liftIO $ STM.atomically $ writeTQueue (rendererPasses r) h
   pure h
+
+texture
+  :: ( MonadIO m
+     , Storable a
+     )
+  => Renderer
+  -> Acquire (TextureInfo a)
+  -> m (Handle Texture)
+texture _r info =
+  TextureHandle <$> defer info
+
+evalTexture
+  :: (MonadResource m, MonadMask m, MonadUnliftIO m)
+  => VkContext
+  -> Renderer
+  -> Handle Texture
+  -> m Texture
+evalTexture ctx r (TextureHandle d) = do
+  evalEmpty d $ \texInfo ->
+    with texInfo $ \(TextureInfo fmt w h sz (imgData :: [x])) -> do
+      props <- Vk.getPhysicalDeviceProperties $ vkPhysicalDevice ctx
+      let
+        imageCreateInfo = Vk.ImageCreateInfo
+          ()
+          Vk.zero
+          Vk.IMAGE_TYPE_2D -- imageType
+          fmt -- format
+          (Vk.Extent3D (fromIntegral w) (fromIntegral h) 1) -- extent
+          1 -- mipLevels
+          1 -- arrayLayers
+          Vk.SAMPLE_COUNT_1_BIT -- samples
+          Vk.IMAGE_TILING_OPTIMAL -- tiling
+          (Vk.IMAGE_USAGE_TRANSFER_DST_BIT .|. Vk.IMAGE_USAGE_SAMPLED_BIT) -- usage
+          Vk.SHARING_MODE_EXCLUSIVE -- sharingMode
+          Vector.empty -- queueFamilyIndices, ignored because SHARING_MODE not "concurrent"
+          Vk.IMAGE_LAYOUT_UNDEFINED -- initialLayout
+
+      (_relKey, imgAlloc) <- allocateAcquire $
+        withImage (vkAllocator ctx) imageCreateInfo sz
+
+      withAllocPtr imgAlloc $ \ptr ->
+        liftIO $ pokeArray (castPtr @() @x ptr) imgData
+      _ <- flush (vkAllocator ctx) imgAlloc 0 sz
+
+      case requiresBufferCopy imgAlloc of
+        Nothing -> pure ()
+        Just (srcBuf, dstImg) -> do
+          liftIO $ STM.atomically $ STM.writeTQueue r.rendererPendingWrites $ do
+            let
+              imgSubresourceLayers = Vk.ImageSubresourceLayers
+                Vk.IMAGE_ASPECT_COLOR_BIT -- aspectMask
+                0 -- mipLevel
+                0 -- baseArrayLayer
+                1 -- layerCount
+              region = Vk.BufferImageCopy
+                0 -- bufferOffset
+                0 -- bufferRowLength :: Word32
+                0 -- bufferImageHeight :: Word32
+                imgSubresourceLayers -- imageSubresource :: ImageSubresourceLayers
+                (Vk.Offset3D 0 0 0) -- imageOffset :: Offset3D
+                (Vk.Extent3D (fromIntegral w) (fromIntegral h) 1) -- imageExtent :: Extent3D
+            CopyToImage
+              $ BufferImageCopyInfo { srcBuffer = srcBuf
+                                    , dstImage = dstImg
+                                    , regions = Vector.singleton region
+                                    }
+
+      let
+        imageViewCreateInfo = Vk.ImageViewCreateInfo
+          ()
+          Vk.zero
+          (getAllocData imgAlloc)
+          Vk.IMAGE_VIEW_TYPE_2D
+          fmt
+          (Vk.ComponentMapping Vk.COMPONENT_SWIZZLE_IDENTITY
+                               Vk.COMPONENT_SWIZZLE_IDENTITY
+                               Vk.COMPONENT_SWIZZLE_IDENTITY
+                               Vk.COMPONENT_SWIZZLE_IDENTITY
+          )
+          (Vk.ImageSubresourceRange
+            Vk.IMAGE_ASPECT_COLOR_BIT -- Colour target
+            0 -- Base mipmap level
+            1 -- Mipmap levels
+            0 -- Base layer
+            1 -- Layer count
+          )
+
+      (_, iv) <- allocateAcquire $
+        withImageView (vkDevice ctx) imageViewCreateInfo
+
+      let
+        samplerCreateInfo = Vk.SamplerCreateInfo
+          ()
+          Vk.zero
+          Vk.FILTER_LINEAR -- mag filter
+          Vk.FILTER_LINEAR -- min filter
+          Vk.SAMPLER_MIPMAP_MODE_LINEAR -- mipmap mode
+          Vk.SAMPLER_ADDRESS_MODE_REPEAT -- address mode u
+          Vk.SAMPLER_ADDRESS_MODE_REPEAT -- address mode v
+          Vk.SAMPLER_ADDRESS_MODE_REPEAT -- address mode w
+          0 -- mip lod bias
+          True -- anisotropy enable
+          (Vk.maxSamplerAnisotropy $ Vk.limits props) -- max anisotropy
+          False -- compare enable
+          Vk.COMPARE_OP_ALWAYS -- compare op
+          0 -- min lod
+          1 -- max lod (mip levels)
+          Vk.BORDER_COLOR_INT_OPAQUE_BLACK -- border color
+          False -- unnormalized coordinates
+      (_, sample) <- allocateAcquire $
+        withSampler (vkDevice ctx) samplerCreateInfo
+
+      pure $ Texture (getAllocData imgAlloc) iv sample
 
 evalRenderPassLayout
   :: (MonadResource m, MonadMask m)
@@ -686,15 +953,16 @@ evalBuffer ctx r (BufferHandle d) = do
         Nothing -> pure ()
         Just (srcBuf, dstBuf) -> do
           liftIO $ STM.atomically $ STM.writeTQueue r.rendererPendingWrites $
-            BufferCopyInfo { srcBuffer = srcBuf
-                           , dstBuffer = dstBuf
-                           , regions = Vector.singleton $
-                               Vk.BufferCopy 0 -- src offset
-                                             0 -- dst offset
-                                             sz
-                           , dstStageMask = mkDstStageMask createInfo.usage
-                           }
-      pure $ Buffer (getAllocBuffer alloc) (getAllocOffset alloc) sz
+            CopyToBuffer $
+              BufferCopyInfo { srcBuffer = srcBuf
+                             , dstBuffer = dstBuf
+                             , regions = Vector.singleton $
+                                 Vk.BufferCopy 0 -- src offset
+                                               0 -- dst offset
+                                               sz
+                             , dstStageMask = mkDstStageMask createInfo.usage
+                             }
+      pure $ Buffer (getAllocData alloc) (getAllocOffset alloc) sz
 
 mkDstStageMask :: Vk.BufferUsageFlagBits -> Vk.PipelineStageFlags2
 mkDstStageMask use =

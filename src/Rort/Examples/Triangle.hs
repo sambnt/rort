@@ -80,7 +80,7 @@ main = do
                              }
                 , drawVertexBuffers = []
                 , drawIndexBuffers = []
-                , drawUniformBuffers = []
+                , drawDescriptors = []
                 , drawSubpass = subpass0
                 }
             pure [draw]

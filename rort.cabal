@@ -62,6 +62,7 @@ library
   exposed-modules:  Rort.Examples.Triangle
                   , Rort.Examples.Buffer
                   , Rort.Examples.Uniform
+                  , Rort.Examples.Texture
                   , Rort.Window
                   , Rort.Window.GLFW
                   , Rort.Window.Types

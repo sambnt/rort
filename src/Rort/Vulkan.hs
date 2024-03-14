@@ -172,6 +172,24 @@ withSemaphore logicalDevice semaphoreInfo =
     (Vk.createSemaphore logicalDevice semaphoreInfo Nothing)
     (\sem -> Vk.destroySemaphore logicalDevice sem Nothing)
 
+withSampler
+  :: Vk.Device
+  -> Vk.SamplerCreateInfo '[]
+  -> Acquire Vk.Sampler
+withSampler logicalDevice createInfo = do
+  mkAcquire
+    (Vk.createSampler logicalDevice createInfo Nothing)
+    (\sampler -> Vk.destroySampler logicalDevice sampler Nothing)
+
+withImageView
+  :: Vk.Device
+  -> Vk.ImageViewCreateInfo '[]
+  -> Acquire Vk.ImageView
+withImageView logicalDevice imageViewCreateInfo =
+  mkAcquire
+    (Vk.createImageView logicalDevice imageViewCreateInfo Nothing)
+    (\iv -> Vk.destroyImageView logicalDevice iv Nothing)
+
 findMemoryType
   :: Vk.PhysicalDevice
   -> Word32

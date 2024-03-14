@@ -1,7 +1,8 @@
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
-module Rort.Examples.Uniform where
+module Rort.Examples.Texture where
 
 import Rort.Window (withWindow, getRequiredExtensions, withWindowEvent, closeWindow)
 import Rort.Vulkan.Context (withVkContext, VkSettings (..), VkContext (..))
@@ -12,9 +13,9 @@ import Control.Monad.IO.Class (liftIO)
 import qualified Vulkan.Core10.FundamentalTypes as Extent2D (Extent2D(width, height))
 import qualified Data.ByteString.Lazy as BSL
 import Rort.Render.Swapchain (Swapchain (vkExtent))
-import Rort.Render.Types (SubpassInfo(..), Draw(..), DrawCallIndexed(..), DrawCall (..), Buffer (Buffer), DrawDescriptor (DescriptorUniform))
+import Rort.Render.Types (TextureInfo(TextureInfo), SubpassInfo(..), Draw(..), DrawCallIndexed(..), DrawCall (..), Buffer (Buffer), DrawDescriptor (..))
 import Control.Monad (when)
-import Foreign (sizeOf, Word16, castPtr, pokeArray)
+import Foreign (sizeOf, Word16, castPtr, pokeArray, peekArray)
 import Rort.Window.Types (WindowEvent(..))
 import Linear (M44, Quaternion)
 import qualified Linear
@@ -24,7 +25,10 @@ import qualified Rort.Allocator as Allocator
 import qualified Chronos
 import Control.Lens ((%~))
 import Data.Acquire (allocateAcquire)
-import Rort.Render (submit, createRenderer, shader, buffer, renderPassLayout, subpass)
+import Rort.Render (submit, createRenderer, shader, buffer, renderPassLayout, subpass, texture)
+import qualified Codec.Image.STB as STB
+import Data.Word (Word8)
+import Data.Bitmap (withBitmap)
 
 main :: IO ()
 main = do
@@ -32,7 +36,7 @@ main = do
     width = 800
     height = 600
 
-  withWindow width height "Example: Uniform" $ \win -> do
+  withWindow width height "Example: Texture" $ \win -> do
     windowExts <- getRequiredExtensions win
 
     runResourceT $ do
@@ -45,7 +49,7 @@ main = do
                                              ]
                          , applicationInfo =
                              Vk.ApplicationInfo
-                               (Just "Example: Uniform")  -- application name
+                               (Just "Example: Texture")   -- application name
                                (Vk.MAKE_API_VERSION 1 0 0) -- application version
                                (Just "No engine")          -- engine name
                                (Vk.MAKE_API_VERSION 1 0 0) -- engine version
@@ -58,17 +62,33 @@ main = do
       r <- createRenderer ctx numFramesInFlight
       vertShader <-
          shader r Vk.SHADER_STAGE_VERTEX_BIT "main"
-           (liftIO $ BSL.readFile "data/uniformBuffer.vert.spv")
+           (liftIO $ BSL.readFile "data/texture.vert.spv")
       fragShader <-
         shader r Vk.SHADER_STAGE_FRAGMENT_BIT "main"
-          (liftIO $ BSL.readFile "data/tri.frag.spv")
+          (liftIO $ BSL.readFile "data/texture.frag.spv")
+
+      tex <-
+        texture r $ do
+          t <- liftIO $ loadTexture "data/texture.jpg"
+          (imgData :: [Word8], (w, h)) <-
+            liftIO $ withBitmap t $ \(w,h) _chan _padd ptr -> do
+              dat <- peekArray (w * h * 4) ptr
+              pure (dat, (w, h))
+          let imgDataSize = fromIntegral $ w * h * 4
+          pure $
+            TextureInfo
+              Vk.FORMAT_R8G8B8A8_SRGB
+              (fromIntegral w)
+              (fromIntegral h)
+              imgDataSize
+              imgData
 
       let
         vertices :: [Float]
-        vertices = [ -0.5, -0.5, 1, 0, 0
-                   ,  0.5, -0.5, 0, 1, 0
-                   ,  0.5,  0.5, 0, 0, 1
-                   , -0.5,  0.5, 1, 1, 1
+        vertices = [ -0.5, -0.5, 1, 0, 0, 1, 0
+                   ,  0.5, -0.5, 0, 1, 0, 0, 0
+                   ,  0.5,  0.5, 0, 0, 1, 0, 1
+                   , -0.5,  0.5, 1, 1, 1, 1, 1
                    ]
         vertexBufferSize = fromIntegral $
           sizeOf (undefined :: Float) * length vertices
@@ -97,12 +117,18 @@ main = do
                                        1 -- descriptor count
                                        Vk.SHADER_STAGE_VERTEX_BIT
                                        Vector.empty -- immutable samplers
+                                   , Vk.DescriptorSetLayoutBinding
+                                       1 -- binding in shader
+                                       Vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+                                       1 -- descriptor count
+                                       Vk.SHADER_STAGE_FRAGMENT_BIT
+                                       Vector.empty -- immutable samplers
                                    ]
                                  ]
                                , vertexBindings   =
                                    [ Vk.VertexInputBindingDescription
                                      0 -- first vertex buffer bound
-                                     (fromIntegral $ sizeOf (undefined :: Float) * 5)
+                                     (fromIntegral $ sizeOf (undefined :: Float) * 7)
                                      Vk.VERTEX_INPUT_RATE_VERTEX
                                    ]
                                , vertexAttributes =
@@ -116,6 +142,11 @@ main = do
                                        0 -- binding
                                        Vk.FORMAT_R32G32B32_SFLOAT
                                        (fromIntegral $ sizeOf (undefined :: Float) * 2)
+                                   , Vk.VertexInputAttributeDescription
+                                       2 -- location (texcoord)
+                                       0 -- binding
+                                       Vk.FORMAT_R32G32_SFLOAT
+                                       (fromIntegral $ sizeOf (undefined :: Float) * 5)
                                    ]
                                , layout           = rpLayout
                                , subpassIndex     = 0
@@ -157,8 +188,10 @@ main = do
                 , drawVertexBuffers = [vertexBuffer]
                 , drawIndexBuffers = [(indexBuffer, Vk.INDEX_TYPE_UINT16)]
                 , drawDescriptors = [
-                      [DescriptorUniform $ Buffer uniformBuffer 0 uniformBufferSize]
+                    [ DescriptorUniform $ Buffer uniformBuffer 0 uniformBufferSize
+                    , DescriptorTexture tex
                     ]
+                  ]
                 , drawSubpass = subpass0
                 }
             pure [draw]
@@ -216,3 +249,11 @@ getUniformBufferData startTime currentTime (w, h) = do
 
     in
       [model, view, proj]
+
+loadTexture :: FilePath -> IO STB.Image
+loadTexture path = do
+  let numComponents = 4 -- Load with four components (alpha channel)
+  eImg <- STB.loadImage' path numComponents
+  case eImg of
+    Left err -> error $ "Failed to load image, error was: '" <> show err <> "'"
+    Right img -> pure img
