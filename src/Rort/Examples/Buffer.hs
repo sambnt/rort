@@ -40,7 +40,7 @@ main = do
                                (Vk.MAKE_API_VERSION 1 0 0) -- application version
                                (Just "No engine")          -- engine name
                                (Vk.MAKE_API_VERSION 1 0 0) -- engine version
-                               (Vk.MAKE_API_VERSION 1 0 0) -- Vulkan API version (patch version ignored)
+                               (Vk.MAKE_API_VERSION 1 3 0) -- Vulkan API version (patch version ignored)
                          }
 
       (_, ctx) <- allocateAcquire $ withVkContext cfg win

@@ -103,10 +103,11 @@ withVkContext cfg win = do
 
   case mDevice of
     Nothing -> error "No physical device found that supports graphics operations"
-    Just (physicalDevice, queFamilies) -> do
+    Just (physicalDevice, queFamilies, (syncFeats, ())) -> do
       logicalDevice <-
         withLogicalDevice
           physicalDevice
+          syncFeats
           queFamilies
           deviceExts
 
@@ -160,10 +161,11 @@ withInstance createInfo =
 
 withLogicalDevice
   :: Vk.PhysicalDevice
+  -> Vk.PhysicalDeviceSynchronization2Features
   -> QueueFamilies
   -> Vector BSC.ByteString
   -> Acquire Vk.Device
-withLogicalDevice device queFamilies exts = do
+withLogicalDevice device deviceFeaturesExtra queFamilies exts = do
   let
     queueCreateInfos = flip foldMap (uniqueQueueFamilies queFamilies) $ \qfIx ->
       [ Vk.DeviceQueueCreateInfo
@@ -180,7 +182,7 @@ withLogicalDevice device queFamilies exts = do
     layers = Vector.fromList [ "VK_LAYER_KHRONOS_validation" ]
 
     logicalDeviceCreateInfo = Vk.DeviceCreateInfo
-      ()
+      (deviceFeaturesExtra, ())
       Vk.zero
       (Vector.fromList $ Vk.SomeStruct <$> queueCreateInfos)
       layers
@@ -227,20 +229,20 @@ pickPhysicalDevice
   :: Vk.Instance
   -> Vk.SurfaceKHR
   -> Vector BSC.ByteString
-  -> IO (Maybe (Vk.PhysicalDevice, QueueFamilies))
+  -> IO (Maybe (Vk.PhysicalDevice, QueueFamilies, (Vk.PhysicalDeviceSynchronization2Features, ())))
 pickPhysicalDevice vkInst surface deviceExts = do
   (_, devices) <- Vk.enumeratePhysicalDevices vkInst
   suitableDevices <- fmap Vector.catMaybes $ forM devices $ \dev -> do
     -- Can use these to check if device supports
     props <- Vk.getPhysicalDeviceProperties dev
-    feats <- Vk.getPhysicalDeviceFeatures dev
+    feats <- Vk.getPhysicalDeviceFeatures2 dev
     mqf <- findQueueFamilies surface dev
     case mqf of
       Nothing -> pure Nothing
       Just qf -> do
         suitable <- isDeviceSuitable surface dev props feats deviceExts qf
         if suitable
-        then pure $ Just (dev, qf)
+        then pure $ Just (dev, qf, feats.next)
         else pure Nothing
 
   pure $ pickFirst suitableDevices
@@ -296,7 +298,7 @@ isDeviceSuitable
   :: Vk.SurfaceKHR
   -> Vk.PhysicalDevice
   -> Vk.PhysicalDeviceProperties
-  -> Vk.PhysicalDeviceFeatures
+  -> Vk.PhysicalDeviceFeatures2 '[Vk.PhysicalDeviceSynchronization2Features]
   -> Vector BSC.ByteString
   -> QueueFamilies
   -> IO Bool
@@ -312,7 +314,7 @@ isDeviceSuitable surface device _props feats deviceExts _queueFams = do
       swapChainAdequate =
         not (null $ swapchainSupportFormats swapChainSupport)
         && not (null $ swapchainSupportPresentModes swapChainSupport)
-    pure (swapChainAdequate && Vk.samplerAnisotropy feats)
+    pure (swapChainAdequate && Vk.samplerAnisotropy feats.features)
 
 checkDeviceExts :: Vector BSC.ByteString -> Vk.PhysicalDevice -> IO Bool
 checkDeviceExts requiredExts device = do
