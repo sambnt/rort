@@ -28,6 +28,31 @@ cabal run exe:rort
 
 ## Issues
 
+### The function pointer for "..." is null
+
+```
+*** Exception: invalid argument (The function pointer for vkCmdPipelineBarrier2 null)
+```
+
+Make sure you specifying a recent enough version of Vulkan in your `VkSettings`:
+
+```
+  cfg = VkSettings { requiredExtensions =
+                       windowExts <> Vector.fromList []
+                   , requiredValidationLayers =
+                       Vector.fromList [ "VK_LAYER_KHRONOS_validation" ]
+                       -- Vector.fromList [ "VK_LAYER_RENDERDOC_Capture" ]
+                   , applicationInfo =
+                       Vk.ApplicationInfo
+                         (Just "Example: Buffer")  -- application name
+                         (Vk.MAKE_API_VERSION 1 0 0) -- application version
+                         (Just "No engine")          -- engine name
+                         (Vk.MAKE_API_VERSION 1 0 0) -- engine version
+                         (Vk.MAKE_API_VERSION 1 3 0) -- Vulkan API version (patch version ignored)
+                   }
+```
+
+
 ### Missing GLIBC version
 
 When trying to use the "VK_LAYER_RENDERDOC_Capture" validation layer, you may encounter the following error:
